@@ -107,15 +107,17 @@ final class ClaudeUsageClient: Sendable {
             throw ClaudeUsageError.decodeFailed("usage", preview(data), "Top-level JSON was not an object")
         }
 
-        guard let session = makeWindow(json["five_hour"] as? [String: Any], defaultMinutes: 300),
-              let weekly = makeWindow(json["seven_day"] as? [String: Any], defaultMinutes: 10_080)
+        guard let session = makeWindow(json["five_hour"] as? [String: Any], defaultMinutes: 300, fallbackReset: .addingMinutes(300)),
+              let weekly = makeWindow(json["seven_day"] as? [String: Any], defaultMinutes: 10_080, fallbackReset: .nextWeeklyBoundary)
         else {
             let keys = json.keys.sorted().joined(separator: ", ")
-            AppLog.claude.error("Claude usage response missing usable windows; keys=\(keys, privacy: .public); preview=\(self.preview(data), privacy: .public)")
-            throw ClaudeUsageError.invalidResponse("Claude usage response did not include readable five_hour and seven_day windows. Keys: \(keys)")
+            let fiveHourKeys = nestedKeys(json["five_hour"])
+            let sevenDayKeys = nestedKeys(json["seven_day"])
+            AppLog.claude.error("Claude usage response missing usable windows; keys=\(keys, privacy: .public); five_hour=\(fiveHourKeys, privacy: .public); seven_day=\(sevenDayKeys, privacy: .public); preview=\(self.preview(data), privacy: .public)")
+            throw ClaudeUsageError.invalidResponse("Claude usage response did not include readable utilization values. Keys: \(keys). five_hour: \(fiveHourKeys). seven_day: \(sevenDayKeys)")
         }
 
-        let opus = makeWindow(json["seven_day_opus"] as? [String: Any], defaultMinutes: 10_080)
+        let opus = makeWindow(json["seven_day_opus"] as? [String: Any], defaultMinutes: 10_080, fallbackReset: .nextWeeklyBoundary)
         let extra = makeExtraUsage(json["extra_usage"] as? [String: Any])
 
         return ClaudeUsageSnapshot(
@@ -130,19 +132,39 @@ final class ClaudeUsageClient: Sendable {
         )
     }
 
-    private func makeWindow(_ window: [String: Any]?, defaultMinutes: Int) -> RateLimitWindow? {
+    private func makeWindow(_ window: [String: Any]?, defaultMinutes: Int, fallbackReset: ResetFallback) -> RateLimitWindow? {
         guard let window else { return nil }
         guard let used = parsePercent(window["utilization"] ?? window["utilization_pct"]) else {
             return nil
         }
-        guard let resetsAt = parseDate(window["resets_at"] as? String ?? window["reset_at"] as? String) else {
-            return nil
-        }
+        let resetsAt = parseResetDate(window["resets_at"] ?? window["reset_at"]) ?? fallbackReset.date
         return RateLimitWindow(
             usedPercent: used,
             windowMinutes: defaultMinutes,
             resetsAt: resetsAt
         )
+    }
+
+    private enum ResetFallback {
+        case addingMinutes(Int)
+        case nextWeeklyBoundary
+
+        var date: Date {
+            switch self {
+            case .addingMinutes(let minutes):
+                return Date().addingTimeInterval(TimeInterval(minutes * 60))
+            case .nextWeeklyBoundary:
+                var components = DateComponents()
+                components.weekday = 2
+                components.hour = 12
+                components.minute = 59
+                return Calendar.current.nextDate(
+                    after: Date(),
+                    matching: components,
+                    matchingPolicy: .nextTime
+                ) ?? Date().addingTimeInterval(10_080 * 60)
+            }
+        }
     }
 
     private func makeExtraUsage(_ value: [String: Any]?) -> ClaudeExtraUsage? {
@@ -180,8 +202,11 @@ final class ClaudeUsageClient: Sendable {
         return cookies.joined(separator: "; ")
     }
 
-    private func parseDate(_ value: String?) -> Date? {
-        guard let value else { return nil }
+    private func parseResetDate(_ value: Any?) -> Date? {
+        if let timestamp = parseDouble(value), timestamp > 0 {
+            return Date(timeIntervalSince1970: timestamp > 10_000_000_000 ? timestamp / 1000 : timestamp)
+        }
+        guard let value = value as? String else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let date = formatter.date(from: value) {
@@ -189,6 +214,13 @@ final class ClaudeUsageClient: Sendable {
         }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: value)
+    }
+
+    private func nestedKeys(_ value: Any?) -> String {
+        guard let dictionary = value as? [String: Any] else {
+            return "<not object>"
+        }
+        return dictionary.keys.sorted().joined(separator: ", ")
     }
 
     private func preview(_ data: Data) -> String {
