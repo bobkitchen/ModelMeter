@@ -20,7 +20,7 @@ enum CodexDataSource: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .liveOAuth:
-            return "Uses Codex's ChatGPT login in auth.json to request live 5-hour and weekly balances."
+            return "Requests live 5-hour and weekly balances through Codex app-server when available, then falls back to Codex's ChatGPT login in auth.json."
         case .localFiles:
             return "Reads Codex's local session snapshots and state_5.sqlite. This can lag or miss live balance changes."
         }
@@ -71,7 +71,7 @@ struct GeminiUsageSnapshot {
     }
 }
 
-struct GeminiUsageItem: Identifiable, Hashable {
+struct GeminiUsageItem: Identifiable, Hashable, Codable {
     let id: String
     let title: String
     let usedPercent: Double
@@ -80,7 +80,110 @@ struct GeminiUsageItem: Identifiable, Hashable {
     var remainingPercent: Double { max(100 - usedPercent, 0) }
 }
 
-enum ProviderKind: String, CaseIterable, Identifiable {
+struct UsageHistoryEntry: Identifiable, Hashable, Codable {
+    let id: UUID
+    let provider: ProviderKind
+    let capturedAt: Date
+    let primaryUsedPercent: Double?
+    let primaryRemainingPercent: Double?
+    let secondaryUsedPercent: Double?
+    let secondaryRemainingPercent: Double?
+    let sourceLabel: String
+
+    init(
+        id: UUID = UUID(),
+        provider: ProviderKind,
+        capturedAt: Date,
+        primaryUsedPercent: Double?,
+        primaryRemainingPercent: Double?,
+        secondaryUsedPercent: Double?,
+        secondaryRemainingPercent: Double?,
+        sourceLabel: String
+    ) {
+        self.id = id
+        self.provider = provider
+        self.capturedAt = capturedAt
+        self.primaryUsedPercent = primaryUsedPercent
+        self.primaryRemainingPercent = primaryRemainingPercent
+        self.secondaryUsedPercent = secondaryUsedPercent
+        self.secondaryRemainingPercent = secondaryRemainingPercent
+        self.sourceLabel = sourceLabel
+    }
+}
+
+enum ProviderReadingQuality {
+    case freshLive(String)
+    case localFallback(String)
+    case lastGood(Date?)
+    case unavailable
+    case notConfigured
+
+    var title: String {
+        switch self {
+        case .freshLive:
+            return "Live"
+        case .localFallback:
+            return "Local"
+        case .lastGood:
+            return "Last good"
+        case .unavailable:
+            return "Unavailable"
+        case .notConfigured:
+            return "Not configured"
+        }
+    }
+
+    var detail: String? {
+        switch self {
+        case .freshLive(let source), .localFallback(let source):
+            return source
+        case .lastGood(let date):
+            guard let date else { return nil }
+            return date.formatted(date: .omitted, time: .shortened)
+        case .unavailable, .notConfigured:
+            return nil
+        }
+    }
+
+    var displayText: String {
+        if let detail {
+            return "\(title): \(detail)"
+        }
+        return title
+    }
+
+    var symbolName: String {
+        switch self {
+        case .freshLive:
+            return "bolt.circle.fill"
+        case .localFallback:
+            return "folder.circle.fill"
+        case .lastGood:
+            return "clock.badge.checkmark.fill"
+        case .unavailable:
+            return "exclamationmark.circle.fill"
+        case .notConfigured:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .freshLive:
+            return .green
+        case .localFallback:
+            return .blue
+        case .lastGood:
+            return .orange
+        case .unavailable:
+            return .secondary
+        case .notConfigured:
+            return .secondary
+        }
+    }
+}
+
+enum ProviderKind: String, CaseIterable, Identifiable, Codable {
     case codex = "Codex"
     case claude = "Claude"
     case gemini = "Gemini"
@@ -242,7 +345,7 @@ struct ModelUsage: Identifiable, Decodable {
     var id: String { model }
 }
 
-struct CodexRateLimits {
+struct CodexRateLimits: Codable {
     let primary: RateLimitWindow
     let secondary: RateLimitWindow
     let credits: CreditBalance?
@@ -256,9 +359,9 @@ struct CodexRateLimits {
     }
 
     var sourceLabel: String {
-        if sourcePath == "codex oauth wham/usage" { return "ChatGPT OAuth live usage" }
+        if sourcePath == "codex oauth wham/usage" { return "ChatGPT OAuth" }
         if sourcePath == "codex app-server" { return "Codex app-server" }
-        if sourcePath.hasPrefix("/") { return "Local Codex fallback" }
+        if sourcePath.hasPrefix("/") { return "Local Codex snapshot" }
         return sourcePath
     }
 
@@ -273,7 +376,7 @@ struct CodexRateLimits {
     }
 }
 
-struct RateLimitWindow {
+struct RateLimitWindow: Codable {
     let usedPercent: Double
     let windowMinutes: Int
     let resetsAt: Date
@@ -311,20 +414,20 @@ struct RateLimitWindow {
     }
 }
 
-struct CreditBalance {
+struct CreditBalance: Codable {
     let hasCredits: Bool
     let unlimited: Bool
     let balance: Double?
 }
 
-struct ClaudeRateLimits {
+struct ClaudeRateLimits: Codable {
     let session: RateLimitWindow
     let weekly: RateLimitWindow
     let opusWeekly: RateLimitWindow?
     let extraUsage: ClaudeExtraUsage?
 }
 
-struct ClaudeExtraUsage {
+struct ClaudeExtraUsage: Codable {
     let currentSpending: Double?
     let budgetLimit: Double?
 }
@@ -420,6 +523,60 @@ enum MenuBarMetric: String, CaseIterable, Identifiable {
             return rateLimits.session
         case .sevenDayUsed, .sevenDayAvailable:
             return rateLimits.weekly
+        }
+    }
+}
+
+enum MenuBarDisplayMode: String, CaseIterable, Identifiable {
+    case allProviders
+    case lowestAvailable
+    case warningsOnly
+    case iconOnly
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .allProviders: return "All"
+        case .lowestAvailable: return "Lowest"
+        case .warningsOnly: return "Warnings"
+        case .iconOnly: return "Icon"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .allProviders:
+            return "Shows every selected provider."
+        case .lowestAvailable:
+            return "Shows the selected provider with the least capacity left."
+        case .warningsOnly:
+            return "Shows only providers that need attention."
+        case .iconOnly:
+            return "Shows only the status icon."
+        }
+    }
+}
+
+enum ResetDisplayMode: String, CaseIterable, Identifiable {
+    case relative
+    case absolute
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .relative: return "Countdown"
+        case .absolute: return "Date & time"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .relative:
+            return "Shows reset timing as a countdown, for example 4d 12h."
+        case .absolute:
+            return "Shows reset timing as a calendar date and time."
         }
     }
 }

@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2 - 2026-06-13
+
+Adds usage history with 24-hour and 7-day graph views, clarifies Codex live balance behavior, and improves reading reliability.
+
+### Changed
+- Live Codex refresh now tries Codex app-server first, then falls back to Codex's ChatGPT OAuth session in `auth.json`.
+- README and privacy policy now disclose live Codex balance checks and distinguish them from Local Codex files mode.
+- Provider cards now show a separate reading-confidence line, such as fresh live reading, local fallback reading, last good reading, or unavailable.
+- The dashboard now includes a compact history chart for recent provider readings.
+- History now plots hourly usage buckets in the 24-hour view and daily peak buckets in the 7-day view.
+- History charts now show percentage and time-axis labels.
+- Reset labels now show a countdown, with the exact reset time available on hover.
+- Reset labels can now be switched between countdown and calendar date/time formats.
+- Menu bar display can now be reduced to all providers, lowest available provider, warning-only text, or icon-only.
+- The menu-bar dashboard remains a popover and includes a bottom-right resize handle; Model Meter remembers the last dashboard size.
+- The history legend now follows the same provider letter/icon setting as the menu bar.
+
+### Fixed
+- Claude and Gemini refreshes no longer overlap when a timer refresh and manual refresh happen at the same time.
+- Codex and Claude preserve the last good balance reading when a later refresh fails.
+- Provider outage status, reading confidence, and usage pace warnings are shown as separate signals.
+- Gemini now also preserves the last good parsed usage reading when a later refresh fails.
+- Sparse history charts now show visible sample dots instead of appearing empty before a line can be drawn.
+- Provider connection, plan/source, and updated-at metadata are now combined into one concise row.
+- Footer controls now leave clear space for the resize grip.
+
 ## 1.1.2 - 2026-05-23
 
 Improves Codex balance tracking and makes the data source explicit.

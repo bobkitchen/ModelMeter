@@ -9,7 +9,7 @@
 
 ---
 
-Model Meter is a native macOS menu bar app for tracking AI assistant usage windows. It currently supports local Codex/OpenAI usage data, optional authenticated Claude usage data, and optional authenticated Gemini usage percentages from Google's Gemini usage page.
+Model Meter is a native macOS menu bar app for tracking AI assistant usage windows. It currently supports live Codex/OpenAI balance checks with a local-file fallback, optional authenticated Claude usage data, and optional authenticated Gemini usage percentages from Google's Gemini usage page.
 
 The app is designed for people who use Codex, Claude, and Gemini heavily and want a small, always-visible indication of remaining capacity without opening each product.
 
@@ -42,18 +42,20 @@ You can choose whether that value means used or available, and whether it repres
 
 ### Codex / OpenAI
 
-Model Meter reads Codex data locally from your Codex folder, normally:
+Model Meter can check Codex balances in two ways. By default, **Live ChatGPT** asks Codex for current 5-hour and weekly balances through Codex app-server when available, then falls back to Codex's existing ChatGPT OAuth session in `auth.json`.
+
+For the fallback **Local Codex files** mode, Model Meter reads Codex data locally from your Codex folder, normally:
 
 ```text
 ~/.codex
 ```
 
-It reads:
+Local Codex files mode reads:
 
 - `sessions/**/*.jsonl` for Codex rate-limit snapshots.
 - `state_5.sqlite` for local token/thread detail, using `/usr/bin/sqlite3` in read-only mode.
 
-Codex balance data is not fetched from an official public OpenAI usage-balance API. The app surfaces the local rate-limit snapshots that Codex writes on your machine. If Codex has not written a recent snapshot, Model Meter cannot invent one and will show that status is unavailable.
+The local-file route can lag behind live account state because it depends on snapshots Codex has already written on your machine. The live route is usually more current, and the app shows which route produced the visible reading.
 
 ### Claude
 
@@ -77,12 +79,12 @@ Third-party trademark and attribution notes are in [`THIRD_PARTY_NOTICES.md`](TH
 
 Model Meter is intended to be local-first. See [`PRIVACY.md`](PRIVACY.md) for the full privacy policy.
 
-- Codex data is read from local files on your Mac.
+- Codex can use live ChatGPT/Codex balance checks or local files, depending on your selected data source.
 - Claude access is optional and uses your authenticated Claude session.
 - Gemini access is optional and uses your authenticated Google/Gemini web session.
 - Claude credentials are stored in macOS Keychain; Gemini uses WebKit website storage and stores only parsed usage values locally.
-- The app does not upload your Codex history or local usage database to a third-party service.
-- The app requires network access for Claude sign-in/usage checks, Gemini sign-in/usage checks, and Sparkle update checks.
+- The app does not upload your Codex history or local usage database to Abokado Labs.
+- The app requires network access for live Codex checks, Claude sign-in/usage checks, Gemini sign-in/usage checks, provider status checks, and Sparkle update checks.
 
 For distribution, the app should be signed and notarized with a stable Developer ID certificate so Keychain trust behaves consistently for users.
 
@@ -158,9 +160,10 @@ Codex is enabled by default.
 /Users/YOUR_USER/.codex
 ```
 
-5. Click **Save and Refresh**.
+5. Leave **Data source** set to **Live ChatGPT** for the most current balance checks, or switch to **Local Codex files** if you want Codex to avoid network calls.
+6. Click **Save and Refresh**.
 
-If Codex data is missing, open Codex and use it normally. Model Meter depends on Codex writing local session snapshots before it can show balance data.
+If live Codex data is missing, open Codex and sign in with ChatGPT. If local Codex data is missing, open Codex and use it normally so it writes local session snapshots.
 
 ### Claude
 
@@ -195,10 +198,16 @@ Model Meter refreshes Gemini through its own embedded WebKit session. Safari doe
 ### Providers
 
 **Enable Codex**  
-Turns the Codex section on or off. When enabled, Model Meter reads local Codex rate-limit and usage files.
+Turns the Codex section on or off. When enabled, Model Meter refreshes Codex through the selected data source.
+
+**Data source**  
+Chooses how Codex is refreshed:
+
+- **Live ChatGPT**: checks current balances through Codex app-server when available, then falls back to Codex's existing ChatGPT OAuth session in `auth.json`.
+- **Local Codex files**: reads local Codex snapshots and `state_5.sqlite`; this avoids live balance calls but can be stale or incomplete.
 
 **Codex home**  
-The folder where Codex stores local state. The default is `~/.codex`.
+The folder where Codex stores local state and `auth.json`. The default is `~/.codex`.
 
 **Enable Claude**  
 Turns the Claude section on or off. Claude requires sign-in before usage data can be shown.
@@ -329,7 +338,7 @@ The Xcode project is generated/configured around:
 
 ## Current Limitations
 
-- Codex balance data depends on local Codex snapshots; there is no official OpenAI balance API used by the app.
+- Live Codex balance data depends on Codex's local sign-in and the currently available Codex/ChatGPT balance routes. Local Codex file mode depends on snapshots that Codex writes on your machine.
 - Claude integration depends on an authenticated Claude web session and may need to be refreshed if Claude changes its session behavior.
 - Gemini integration depends on `https://gemini.google.com/usage` exposing visible percentages for the signed-in account and may need to be refreshed if Google changes that page.
 - App Sandbox is currently off because the app reads `~/.codex`, uses Keychain, launches `/usr/bin/sqlite3` read-only, and uses WebKit for Claude/Gemini sign-in.

@@ -90,7 +90,7 @@ struct SettingsView: View {
                 ])
                 TextField("Codex home", text: $store.codexHome)
                     .disabled(!store.codexEnabled)
-                helperText("Live ChatGPT does not store your OpenAI password or API key; it uses Codex's existing `auth.json`. Local Codex files avoids network calls but may be stale or incomplete.")
+                helperText("Live ChatGPT does not store your OpenAI password or API key; it asks Codex app-server first and can fall back to Codex's existing `auth.json`. Local Codex files avoids live balance calls but may be stale or incomplete.")
                 SettingValueRow(title: "Current source", value: store.snapshot.rateLimits?.sourceLabel ?? "Not refreshed")
                 if let error = store.snapshot.errorMessage, store.codexEnabled {
                     statusText(error, style: .warning)
@@ -163,6 +163,14 @@ struct SettingsView: View {
             }
 
             SettingsSection("Display") {
+                Picker("Mode", selection: $store.menuBarDisplayMode) {
+                    ForEach(MenuBarDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                helperText(store.menuBarDisplayMode.detail)
+
                 Picker("Metric", selection: $store.menuBarMetric) {
                     ForEach(MenuBarMetric.allCases) { metric in
                         Text(metric.title).tag(metric)
@@ -175,6 +183,7 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                helperText("This controls provider labels in both the menu bar and the dashboard history legend.")
 
                 Picker("Icon", selection: $store.menuBarIconMode) {
                     ForEach(MenuBarIconMode.allCases) { mode in
@@ -189,6 +198,14 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+
+                Picker("Reset times", selection: $store.resetDisplayMode) {
+                    ForEach(ResetDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                helperText(store.resetDisplayMode.detail)
             }
 
             SettingsSection("Warnings") {
@@ -196,7 +213,7 @@ struct SettingsView: View {
                 helperText("Turns a menu bar value red when usage is ahead of the time elapsed in its reset window. The time marker remains visible on each bar.")
 
                 Toggle("Warn when a provider reports an outage", isOn: $store.providerStatusWarningsEnabled)
-                helperText("Checks official provider status sources about every 5 minutes. Status pages can lag real incidents, so this is a known-issue warning rather than a full health guarantee.")
+                helperText("Checks official provider status sources about every 5 minutes. Status pages can lag real incidents, so this is a dashboard and tooltip warning rather than a full health guarantee. Usage values only turn red for pace warnings.")
 
                 settingsButton("Refresh Provider Status", systemImage: "waveform.path.ecg") {
                     store.refreshProviderStatuses()

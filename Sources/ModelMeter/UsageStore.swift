@@ -6,6 +6,7 @@ final class UsageStore: ObservableObject {
     @Published private(set) var claudeSnapshot = ClaudeUsageSnapshot()
     @Published private(set) var geminiSnapshot = GeminiUsageSnapshot()
     @Published private(set) var providerStatuses = ProviderStatusSnapshot()
+    @Published private(set) var history: [UsageHistoryEntry]
     @Published var codexHome: String
     @Published var codexDataSource: CodexDataSource
     @Published var claudeOrganizationID: String
@@ -19,9 +20,11 @@ final class UsageStore: ObservableObject {
     @Published var notificationsEnabled: Bool
     @Published var notificationThreshold: Double
     @Published var menuBarMetric: MenuBarMetric
+    @Published var menuBarDisplayMode: MenuBarDisplayMode
     @Published var menuBarIconMode: MenuBarIconMode
     @Published var menuBarLabelStyle: MenuBarLabelStyle
     @Published var menuBarFontSize: MenuBarFontSize
+    @Published var resetDisplayMode: ResetDisplayMode
     @Published var codexEnabled: Bool
     @Published var claudeEnabled: Bool
     @Published var geminiEnabled: Bool
@@ -32,9 +35,7 @@ final class UsageStore: ObservableObject {
     @Published var providerStatusWarningsEnabled: Bool
 
     private let settings = SettingsStore.shared
-    private let reader = UsageReader()
-    private let codexLiveUsageClient = CodexLiveUsageClient()
-    private let codexAppServerClient = CodexAppServerClient()
+    private let codexRefreshPlan: CodexRefreshPlan
     private let claudeClient = ClaudeUsageClient()
     private let geminiClient = GeminiUsageClient()
     private let providerStatusClient = ProviderStatusClient()
@@ -43,9 +44,12 @@ final class UsageStore: ObservableObject {
     private var lastNotificationStatus: UsageStatus = .unknown
     private var hasStarted = false
     private var isRefreshingCodex = false
+    private var isRefreshingClaude = false
+    private var isRefreshingGemini = false
     private var isRefreshingProviderStatuses = false
 
-    init() {
+    init(codexRefreshPlan: CodexRefreshPlan = .live()) {
+        self.codexRefreshPlan = codexRefreshPlan
         codexHome = settings.codexHome
         codexDataSource = settings.codexDataSource
         claudeOrganizationID = settings.claudeOrganizationID
@@ -59,9 +63,11 @@ final class UsageStore: ObservableObject {
         notificationsEnabled = settings.notificationsEnabled
         notificationThreshold = settings.notificationThreshold
         menuBarMetric = settings.menuBarMetric
+        menuBarDisplayMode = settings.menuBarDisplayMode
         menuBarIconMode = settings.menuBarIconMode
         menuBarLabelStyle = settings.menuBarLabelStyle
         menuBarFontSize = settings.menuBarFontSize
+        resetDisplayMode = settings.resetDisplayMode
         codexEnabled = settings.codexEnabled
         claudeEnabled = settings.claudeEnabled
         geminiEnabled = settings.geminiEnabled
@@ -70,20 +76,61 @@ final class UsageStore: ObservableObject {
         showGeminiInMenuBar = settings.showGeminiInMenuBar
         paceWarningsEnabled = settings.paceWarningsEnabled
         providerStatusWarningsEnabled = settings.providerStatusWarningsEnabled
+        history = UsageHistoryStore.load()
     }
 
     var menuTitle: String {
-        var parts: [String] = []
+        switch menuBarDisplayMode {
+        case .allProviders:
+            return menuTitleParts().map(\.text).joined(separator: "  ").ifEmpty("MM")
+        case .lowestAvailable:
+            return lowestAvailableMenuTitlePart()?.text ?? "MM"
+        case .warningsOnly:
+            return menuTitleParts().filter(\.warning).map(\.text).joined(separator: "  ").ifEmpty("OK")
+        case .iconOnly:
+            return "Icon only"
+        }
+    }
+
+    private func menuTitleParts() -> [MenuTitlePart] {
+        var result: [MenuTitlePart] = []
         if codexEnabled && showCodexInMenuBar {
-            parts.append(menuBarMetric.value(from: snapshot).map { "C \(UsageMath.wholePercent($0))" } ?? "C --")
+            result.append(MenuTitlePart(provider: .codex, label: "C", value: menuBarMetric.value(from: snapshot), warning: codexMenuMetricAheadOfPace || codexMenuStatusWarning))
         }
         if claudeEnabled && showClaudeInMenuBar {
-            parts.append(menuBarMetric.value(from: claudeSnapshot).map { "Cl \(UsageMath.wholePercent($0))" } ?? "Cl --")
+            result.append(MenuTitlePart(provider: .claude, label: "Cl", value: menuBarMetric.value(from: claudeSnapshot), warning: claudeMenuMetricAheadOfPace || claudeMenuStatusWarning))
         }
         if geminiEnabled && showGeminiInMenuBar {
-            parts.append(menuBarMetric.value(from: geminiSnapshot).map { "G \(UsageMath.wholePercent($0))" } ?? "G --")
+            result.append(MenuTitlePart(provider: .gemini, label: "G", value: menuBarMetric.value(from: geminiSnapshot), warning: geminiMenuMetricAheadOfPace || geminiMenuStatusWarning))
         }
-        return parts.isEmpty ? "LLM" : parts.joined(separator: "  ")
+        return result
+    }
+
+    private func lowestAvailableMenuTitlePart() -> MenuTitlePart? {
+        let metric: MenuBarMetric
+        switch menuBarMetric {
+        case .fiveHourUsed, .fiveHourAvailable:
+            metric = .fiveHourAvailable
+        case .sevenDayUsed, .sevenDayAvailable:
+            metric = .sevenDayAvailable
+        }
+
+        return menuTitleParts()
+            .compactMap { part -> (part: MenuTitlePart, value: Double)? in
+                let value: Double?
+                switch part.provider {
+                case .codex:
+                    value = metric.value(from: snapshot)
+                case .claude:
+                    value = metric.value(from: claudeSnapshot)
+                case .gemini:
+                    value = metric.value(from: geminiSnapshot)
+                }
+                guard let value else { return nil }
+                return (MenuTitlePart(provider: part.provider, label: part.label, value: value, warning: part.warning), value)
+            }
+            .min { $0.value < $1.value }?
+            .part
     }
 
     var codexMenuMetricAheadOfPace: Bool {
@@ -146,52 +193,31 @@ final class UsageStore: ObservableObject {
         isRefreshingCodex = true
         let codexHome = codexHome
         let codexDataSource = codexDataSource
-        let reader = reader
-        let codexLiveUsageClient = codexLiveUsageClient
+        let codexRefreshPlan = codexRefreshPlan
 
         Task.detached(priority: .utility) {
             let result = Result {
                 AppLog.codex.info("Codex refresh source selected: \(codexDataSource.title, privacy: .public)")
-
-                switch codexDataSource {
-                case .liveOAuth:
-                    var liveSnapshot = UsageSnapshot(updatedAt: Date())
-                    do {
-                        let liveRateLimits = try codexLiveUsageClient.loadRateLimits(codexHome: codexHome)
-                        liveSnapshot.rateLimits = liveRateLimits
-                        liveSnapshot.updatedAt = Date()
-                        liveSnapshot.errorMessage = nil
-                        AppLog.codex.info("Codex refresh using live OAuth source")
-                        return liveSnapshot
-                    } catch {
-                        AppLog.codex.error("Codex live OAuth refresh failed: \(error.localizedDescription, privacy: .public)")
-                        liveSnapshot.rateLimits = nil
-                        liveSnapshot.updatedAt = Date()
-                        liveSnapshot.errorMessage = "Live Codex refresh failed. Switch Codex data source to Local Codex files to use the fallback route. Check Xcode logs for ModelMeter/Codex."
-                        return liveSnapshot
-                    }
-
-                case .localFiles:
-                    AppLog.codex.info("Codex local file refresh starting")
-                    var fullSnapshot = (try? reader.loadSnapshot(codexHome: codexHome)) ?? UsageSnapshot(updatedAt: Date())
-                    let localSource = fullSnapshot.rateLimits?.sourceLabel ?? "none"
-                    AppLog.codex.info("Codex local files loaded; source=\(localSource, privacy: .public); hasRateLimits=\((fullSnapshot.rateLimits != nil), privacy: .public)")
-                    fullSnapshot.updatedAt = fullSnapshot.rateLimits?.capturedAt ?? fullSnapshot.updatedAt ?? Date()
-                    if let local = fullSnapshot.rateLimits, local.isLikelyPlaceholder {
-                        fullSnapshot.rateLimits = nil
-                        fullSnapshot.errorMessage = "Local Codex files contain only placeholder balance data. Switch Codex data source to Live ChatGPT for current balances."
-                    } else if fullSnapshot.rateLimits == nil {
-                        fullSnapshot.errorMessage = "No Codex rate-limit balances found in local files."
-                    } else {
-                        fullSnapshot.errorMessage = nil
-                    }
-                    return fullSnapshot
-                }
+                return try codexRefreshPlan.loadSnapshot(codexHome: codexHome, dataSource: codexDataSource)
             }
             await MainActor.run {
                 self.isRefreshingCodex = false
                 switch result {
                 case .success(let fullSnapshot):
+                    if let rateLimits = fullSnapshot.rateLimits, fullSnapshot.errorMessage == nil {
+                        LastGoodUsageCache.saveCodexRateLimits(rateLimits)
+                        self.recordHistory(
+                            UsageHistoryEntry(
+                                provider: .codex,
+                                capturedAt: rateLimits.capturedAt,
+                                primaryUsedPercent: rateLimits.primary.usedPercent,
+                                primaryRemainingPercent: rateLimits.primary.remainingPercent,
+                                secondaryUsedPercent: rateLimits.secondary.usedPercent,
+                                secondaryRemainingPercent: rateLimits.secondary.remainingPercent,
+                                sourceLabel: rateLimits.sourceLabel
+                            )
+                        )
+                    }
                     self.snapshot = fullSnapshot
                     self.notifyIfNeeded(fullSnapshot)
                     AppLog.codex.info("Codex refresh finished; source=\(fullSnapshot.rateLimits?.sourceLabel ?? "none", privacy: .public); error=\(fullSnapshot.errorMessage ?? "none", privacy: .public)")
@@ -199,6 +225,11 @@ final class UsageStore: ObservableObject {
                     var current = self.snapshot
                     current.errorMessage = error.localizedDescription
                     current.updatedAt = Date()
+                    if current.rateLimits == nil, let cached = LastGoodUsageCache.loadCodexRateLimits() {
+                        current.rateLimits = cached
+                        current.updatedAt = cached.capturedAt
+                        current.errorMessage = error.localizedDescription + " Showing the last good Codex reading."
+                    }
                     self.snapshot = current
                     AppLog.codex.error("Codex refresh crashed: \(error.localizedDescription, privacy: .public)")
                 }
@@ -214,6 +245,7 @@ final class UsageStore: ObservableObject {
 
     func resetClaudeCredentials() {
         let status = KeychainStore.clearClaudeCredentials()
+        LastGoodUsageCache.clearClaudeSnapshot()
         claudeSessionKey = ""
         claudeCfClearance = ""
         claudeSnapshot = ClaudeUsageSnapshot(
@@ -224,6 +256,7 @@ final class UsageStore: ObservableObject {
 
     func resetGeminiCredentials() {
         Task { await GeminiWebSession.shared.clearSession() }
+        LastGoodUsageCache.clearGeminiSnapshot()
         geminiCookieHeader = ""
         geminiSnapshot = GeminiUsageSnapshot(updatedAt: Date())
     }
@@ -250,9 +283,11 @@ final class UsageStore: ObservableObject {
         settings.notificationsEnabled = notificationsEnabled
         settings.notificationThreshold = notificationThreshold
         settings.menuBarMetric = menuBarMetric
+        settings.menuBarDisplayMode = menuBarDisplayMode
         settings.menuBarIconMode = menuBarIconMode
         settings.menuBarLabelStyle = menuBarLabelStyle
         settings.menuBarFontSize = menuBarFontSize
+        settings.resetDisplayMode = resetDisplayMode
         settings.codexEnabled = codexEnabled
         settings.claudeEnabled = claudeEnabled
         settings.geminiEnabled = geminiEnabled
@@ -315,18 +350,32 @@ final class UsageStore: ObservableObject {
 
 
     private func refreshGemini() async {
+        guard !isRefreshingGemini else {
+            AppLog.gemini.info("Gemini refresh skipped because one is already running")
+            return
+        }
+        isRefreshingGemini = true
+        defer { isRefreshingGemini = false }
+
         AppLog.gemini.info("Gemini refresh queued")
         do {
             geminiSnapshot = try await geminiClient.fetch()
+            LastGoodUsageCache.saveGeminiSnapshot(geminiSnapshot)
+            recordGeminiHistoryIfAvailable(sourceLabel: "Gemini usage page")
             AppLog.gemini.info("Gemini refresh finished; error=none")
         } catch {
             if !geminiSnapshot.items.isEmpty {
+                LastGoodUsageCache.saveGeminiSnapshot(geminiSnapshot)
                 geminiSnapshot = GeminiUsageSnapshot(
                     items: geminiSnapshot.items,
                     updatedAt: geminiSnapshot.updatedAt,
                     errorMessage: error.localizedDescription
                 )
                 AppLog.gemini.error("Gemini refresh failed; preserving current snapshot; error=\(error.localizedDescription, privacy: .public)")
+            } else if var cached = LastGoodUsageCache.loadGeminiSnapshot() {
+                cached.errorMessage = error.localizedDescription + " Showing the last good Gemini reading."
+                geminiSnapshot = cached
+                AppLog.gemini.error("Gemini refresh failed; using cached snapshot; error=\(error.localizedDescription, privacy: .public)")
             } else {
                 geminiSnapshot = GeminiUsageSnapshot(
                     updatedAt: Date(),
@@ -346,10 +395,19 @@ final class UsageStore: ObservableObject {
         geminiEnabled = true
         showGeminiInMenuBar = true
         geminiSnapshot = snapshot
+        LastGoodUsageCache.saveGeminiSnapshot(snapshot)
+        recordGeminiHistoryIfAvailable(sourceLabel: "Gemini usage page")
         persistSettings()
     }
 
     private func refreshClaude() async {
+        guard !isRefreshingClaude else {
+            AppLog.claude.info("Claude refresh skipped because one is already running")
+            return
+        }
+        isRefreshingClaude = true
+        defer { isRefreshingClaude = false }
+
         AppLog.claude.info("Claude refresh queued; configuredOrganization=\((!self.claudeOrganizationID.isEmpty), privacy: .public)")
         let credentials = loadedClaudeCredentials()
         guard !credentials.sessionKey.isEmpty else {
@@ -365,9 +423,26 @@ final class UsageStore: ObservableObject {
                 cfClearance: credentials.cfClearance
             )
             claudeSnapshot = result
+            LastGoodUsageCache.saveClaudeSnapshot(result)
+            recordHistory(
+                UsageHistoryEntry(
+                    provider: .claude,
+                    capturedAt: result.updatedAt ?? Date(),
+                    primaryUsedPercent: result.rateLimits?.session.usedPercent,
+                    primaryRemainingPercent: result.rateLimits?.session.remainingPercent,
+                    secondaryUsedPercent: result.rateLimits?.weekly.usedPercent,
+                    secondaryRemainingPercent: result.rateLimits?.weekly.remainingPercent,
+                    sourceLabel: "Authenticated Claude usage"
+                )
+            )
             AppLog.claude.info("Claude refresh finished; error=none")
         } catch {
-            claudeSnapshot = ClaudeUsageSnapshot(updatedAt: Date(), errorMessage: error.localizedDescription)
+            if var cached = LastGoodUsageCache.loadClaudeSnapshot() {
+                cached.errorMessage = error.localizedDescription + " Showing the last good Claude reading."
+                claudeSnapshot = cached
+            } else {
+                claudeSnapshot = ClaudeUsageSnapshot(updatedAt: Date(), errorMessage: error.localizedDescription)
+            }
             AppLog.claude.error("Claude refresh failed: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -380,6 +455,26 @@ final class UsageStore: ObservableObject {
         claudeSessionKey = credentials.sessionKey
         claudeCfClearance = credentials.cfClearance
         return credentials
+    }
+
+    private func recordGeminiHistoryIfAvailable(sourceLabel: String) {
+        guard !geminiSnapshot.items.isEmpty else { return }
+        recordHistory(
+            UsageHistoryEntry(
+                provider: .gemini,
+                capturedAt: geminiSnapshot.updatedAt ?? Date(),
+                primaryUsedPercent: geminiSnapshot.primaryItem?.usedPercent,
+                primaryRemainingPercent: geminiSnapshot.primaryItem?.remainingPercent,
+                secondaryUsedPercent: geminiSnapshot.weeklyItem?.usedPercent,
+                secondaryRemainingPercent: geminiSnapshot.weeklyItem?.remainingPercent,
+                sourceLabel: sourceLabel
+            )
+        )
+    }
+
+    private func recordHistory(_ entry: UsageHistoryEntry) {
+        guard entry.primaryUsedPercent != nil || entry.secondaryUsedPercent != nil else { return }
+        history = UsageHistoryStore.append(entry, to: history)
     }
 
     func completeClaudeSignIn(sessionKey: String, cfClearance: String, organizationID: String?) async {
@@ -405,5 +500,240 @@ final class UsageStore: ObservableObject {
                 : " Keychain save failed: \(KeychainStore.statusDescription(credentialsStatus))"
             claudeSnapshot = ClaudeUsageSnapshot(updatedAt: Date(), errorMessage: error.localizedDescription + keychainMessage)
         }
+    }
+}
+
+private enum LastGoodUsageCache {
+    private static let codexRateLimitsKey = "lastGoodCodexRateLimits"
+    private static let claudeSnapshotKey = "lastGoodClaudeSnapshot"
+    private static let geminiSnapshotKey = "lastGoodGeminiSnapshot"
+
+    private struct ClaudePayload: Codable {
+        let rateLimits: ClaudeRateLimits
+        let updatedAt: Date
+    }
+
+    private struct GeminiPayload: Codable {
+        let items: [GeminiUsageItem]
+        let updatedAt: Date
+        let accountEmail: String?
+        let accountPlan: String?
+    }
+
+    static func saveCodexRateLimits(_ rateLimits: CodexRateLimits) {
+        guard let data = try? JSONEncoder().encode(rateLimits) else { return }
+        UserDefaults.standard.set(data, forKey: codexRateLimitsKey)
+    }
+
+    static func loadCodexRateLimits() -> CodexRateLimits? {
+        guard let data = UserDefaults.standard.data(forKey: codexRateLimitsKey) else { return nil }
+        return try? JSONDecoder().decode(CodexRateLimits.self, from: data)
+    }
+
+    static func saveClaudeSnapshot(_ snapshot: ClaudeUsageSnapshot) {
+        guard let rateLimits = snapshot.rateLimits else { return }
+        let payload = ClaudePayload(rateLimits: rateLimits, updatedAt: snapshot.updatedAt ?? Date())
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: claudeSnapshotKey)
+    }
+
+    static func loadClaudeSnapshot() -> ClaudeUsageSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: claudeSnapshotKey),
+              let payload = try? JSONDecoder().decode(ClaudePayload.self, from: data) else {
+            return nil
+        }
+        return ClaudeUsageSnapshot(
+            rateLimits: payload.rateLimits,
+            updatedAt: payload.updatedAt,
+            errorMessage: nil
+        )
+    }
+
+    static func clearClaudeSnapshot() {
+        UserDefaults.standard.removeObject(forKey: claudeSnapshotKey)
+    }
+
+    static func saveGeminiSnapshot(_ snapshot: GeminiUsageSnapshot) {
+        guard !snapshot.items.isEmpty else { return }
+        let payload = GeminiPayload(
+            items: snapshot.items,
+            updatedAt: snapshot.updatedAt ?? Date(),
+            accountEmail: snapshot.accountEmail,
+            accountPlan: snapshot.accountPlan
+        )
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: geminiSnapshotKey)
+    }
+
+    static func loadGeminiSnapshot() -> GeminiUsageSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: geminiSnapshotKey),
+              let payload = try? JSONDecoder().decode(GeminiPayload.self, from: data),
+              !payload.items.isEmpty else {
+            return nil
+        }
+        return GeminiUsageSnapshot(
+            items: payload.items,
+            updatedAt: payload.updatedAt,
+            errorMessage: nil,
+            accountEmail: payload.accountEmail,
+            accountPlan: payload.accountPlan
+        )
+    }
+
+    static func clearGeminiSnapshot() {
+        UserDefaults.standard.removeObject(forKey: geminiSnapshotKey)
+    }
+}
+
+private enum UsageHistoryStore {
+    private static let key = "usageHistoryEntries"
+    private static let maximumAge: TimeInterval = 7 * 24 * 60 * 60
+    private static let maximumEntries = 1_200
+
+    static func load(now: Date = Date()) -> [UsageHistoryEntry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let entries = try? JSONDecoder().decode([UsageHistoryEntry].self, from: data) else {
+            return []
+        }
+        return prune(entries, now: now)
+    }
+
+    static func append(_ entry: UsageHistoryEntry, to entries: [UsageHistoryEntry], now: Date = Date()) -> [UsageHistoryEntry] {
+        var next = entries
+        let duplicate = next.contains { existing in
+            existing.provider == entry.provider
+                && abs(existing.capturedAt.timeIntervalSince(entry.capturedAt)) < 2
+                && existing.primaryUsedPercent == entry.primaryUsedPercent
+                && existing.secondaryUsedPercent == entry.secondaryUsedPercent
+        }
+        if !duplicate {
+            next.append(entry)
+        }
+        next = prune(next, now: now)
+        save(next)
+        return next
+    }
+
+    private static func prune(_ entries: [UsageHistoryEntry], now: Date) -> [UsageHistoryEntry] {
+        let cutoff = now.addingTimeInterval(-maximumAge)
+        return Array(
+            entries
+                .filter { $0.capturedAt >= cutoff }
+                .sorted { $0.capturedAt < $1.capturedAt }
+                .suffix(maximumEntries)
+        )
+    }
+
+    private static func save(_ entries: [UsageHistoryEntry]) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+private struct MenuTitlePart {
+    let provider: ProviderKind
+    let label: String
+    let value: Double?
+    let warning: Bool
+
+    var text: String {
+        "\(label)\(warning ? "!" : "") \(value.map { UsageMath.wholePercent($0) } ?? "--")"
+    }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String {
+        isEmpty ? fallback : self
+    }
+}
+
+struct CodexRefreshPlan: Sendable {
+    let loadAppServerRateLimits: @Sendable () throws -> CodexRateLimits
+    let loadOAuthRateLimits: @Sendable (_ codexHome: String) throws -> CodexRateLimits
+    let loadLocalSnapshot: @Sendable (_ codexHome: String) throws -> UsageSnapshot
+    let loadCachedRateLimits: @Sendable () -> CodexRateLimits?
+
+    static func live() -> CodexRefreshPlan {
+        let appServerClient = CodexAppServerClient()
+        let oauthClient = CodexLiveUsageClient()
+        let reader = UsageReader()
+        return CodexRefreshPlan(
+            loadAppServerRateLimits: { try appServerClient.loadRateLimits() },
+            loadOAuthRateLimits: { codexHome in try oauthClient.loadRateLimits(codexHome: codexHome) },
+            loadLocalSnapshot: { codexHome in try reader.loadSnapshot(codexHome: codexHome) },
+            loadCachedRateLimits: { LastGoodUsageCache.loadCodexRateLimits() }
+        )
+    }
+
+    func loadSnapshot(codexHome: String, dataSource: CodexDataSource) throws -> UsageSnapshot {
+        switch dataSource {
+        case .liveOAuth:
+            return loadLiveSnapshot(codexHome: codexHome)
+        case .localFiles:
+            return loadLocalFileSnapshot(codexHome: codexHome)
+        }
+    }
+
+    private func loadLiveSnapshot(codexHome: String) -> UsageSnapshot {
+        var liveSnapshot = UsageSnapshot(updatedAt: Date())
+        var failures: [String] = []
+
+        do {
+            let liveRateLimits = try loadAppServerRateLimits()
+            liveSnapshot.rateLimits = liveRateLimits
+            liveSnapshot.updatedAt = liveRateLimits.capturedAt
+            liveSnapshot.errorMessage = nil
+            AppLog.codex.info("Codex refresh using app-server live source")
+            return liveSnapshot
+        } catch {
+            failures.append("Codex app-server: \(error.localizedDescription)")
+            AppLog.codex.warning("Codex app-server refresh failed; trying OAuth fallback: \(error.localizedDescription, privacy: .public)")
+        }
+
+        do {
+            let liveRateLimits = try loadOAuthRateLimits(codexHome)
+            liveSnapshot.rateLimits = liveRateLimits
+            liveSnapshot.updatedAt = liveRateLimits.capturedAt
+            liveSnapshot.errorMessage = nil
+            AppLog.codex.info("Codex refresh using live OAuth fallback")
+            return liveSnapshot
+        } catch {
+            failures.append("ChatGPT OAuth: \(error.localizedDescription)")
+            AppLog.codex.error("Codex live OAuth refresh failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        if let cached = loadCachedRateLimits() {
+            liveSnapshot.rateLimits = cached
+            liveSnapshot.updatedAt = cached.capturedAt
+            liveSnapshot.errorMessage = "Live Codex refresh failed. Showing the last good Codex reading."
+        } else {
+            liveSnapshot.rateLimits = nil
+            liveSnapshot.updatedAt = Date()
+            liveSnapshot.errorMessage = "Live Codex refresh failed. Switch Codex data source to Local Codex files to use the fallback route. Check Xcode logs for ModelMeter/Codex."
+        }
+        AppLog.codex.error("All live Codex refresh routes failed: \(failures.joined(separator: " | "), privacy: .public)")
+        return liveSnapshot
+    }
+
+    private func loadLocalFileSnapshot(codexHome: String) -> UsageSnapshot {
+        AppLog.codex.info("Codex local file refresh starting")
+        var fullSnapshot = (try? loadLocalSnapshot(codexHome)) ?? UsageSnapshot(updatedAt: Date())
+        let localSource = fullSnapshot.rateLimits?.sourceLabel ?? "none"
+        AppLog.codex.info("Codex local files loaded; source=\(localSource, privacy: .public); hasRateLimits=\((fullSnapshot.rateLimits != nil), privacy: .public)")
+        fullSnapshot.updatedAt = fullSnapshot.rateLimits?.capturedAt ?? fullSnapshot.updatedAt ?? Date()
+        if let local = fullSnapshot.rateLimits, local.isLikelyPlaceholder {
+            fullSnapshot.rateLimits = nil
+            fullSnapshot.errorMessage = "Local Codex files contain only placeholder balance data. Switch Codex data source to Live ChatGPT for current balances."
+        } else if fullSnapshot.rateLimits == nil {
+            fullSnapshot.errorMessage = "No Codex rate-limit balances found in local files."
+        } else {
+            fullSnapshot.errorMessage = nil
+        }
+        if fullSnapshot.rateLimits == nil, let cached = loadCachedRateLimits() {
+            fullSnapshot.rateLimits = cached
+            fullSnapshot.updatedAt = cached.capturedAt
+            fullSnapshot.errorMessage = (fullSnapshot.errorMessage ?? "Codex local file refresh failed.") + " Showing the last good Codex reading."
+        }
+        return fullSnapshot
     }
 }

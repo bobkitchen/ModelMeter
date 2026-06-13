@@ -136,4 +136,133 @@ final class UsageReaderTests: XCTestCase {
         XCTAssertTrue(GeminiUsageParser.parse(html).isEmpty)
     }
 
+    func testLiveCodexRefreshUsesAppServerBeforeOAuth() throws {
+        let calls = CallLog()
+        let appServerLimits = makeRateLimits(sourcePath: "codex app-server", usedPercent: 12)
+        let oauthLimits = makeRateLimits(sourcePath: "codex oauth wham/usage", usedPercent: 34)
+        let plan = CodexRefreshPlan(
+            loadAppServerRateLimits: {
+                calls.append("app-server")
+                return appServerLimits
+            },
+            loadOAuthRateLimits: { _ in
+                calls.append("oauth")
+                return oauthLimits
+            },
+            loadLocalSnapshot: { _ in
+                calls.append("local")
+                return UsageSnapshot()
+            },
+            loadCachedRateLimits: { nil }
+        )
+
+        let snapshot = try plan.loadSnapshot(codexHome: "/tmp/codex", dataSource: .liveOAuth)
+
+        XCTAssertEqual(calls.values, ["app-server"])
+        XCTAssertEqual(snapshot.rateLimits?.sourcePath, "codex app-server")
+        XCTAssertNil(snapshot.errorMessage)
+    }
+
+    func testLiveCodexRefreshFallsBackToOAuthWhenAppServerFails() throws {
+        let calls = CallLog()
+        let oauthLimits = makeRateLimits(sourcePath: "codex oauth wham/usage", usedPercent: 34)
+        let plan = CodexRefreshPlan(
+            loadAppServerRateLimits: {
+                calls.append("app-server")
+                throw CodexRefreshTestError.failed("app-server unavailable")
+            },
+            loadOAuthRateLimits: { _ in
+                calls.append("oauth")
+                return oauthLimits
+            },
+            loadLocalSnapshot: { _ in
+                calls.append("local")
+                return UsageSnapshot()
+            },
+            loadCachedRateLimits: { nil }
+        )
+
+        let snapshot = try plan.loadSnapshot(codexHome: "/tmp/codex", dataSource: .liveOAuth)
+
+        XCTAssertEqual(calls.values, ["app-server", "oauth"])
+        XCTAssertEqual(snapshot.rateLimits?.sourcePath, "codex oauth wham/usage")
+        XCTAssertNil(snapshot.errorMessage)
+    }
+
+    func testLiveCodexRefreshUsesCachedReadingWhenLiveRoutesFail() throws {
+        let calls = CallLog()
+        let cachedLimits = makeRateLimits(sourcePath: "codex oauth wham/usage", usedPercent: 56)
+        let plan = CodexRefreshPlan(
+            loadAppServerRateLimits: {
+                calls.append("app-server")
+                throw CodexRefreshTestError.failed("app-server unavailable")
+            },
+            loadOAuthRateLimits: { _ in
+                calls.append("oauth")
+                throw CodexRefreshTestError.failed("oauth unavailable")
+            },
+            loadLocalSnapshot: { _ in
+                calls.append("local")
+                return UsageSnapshot()
+            },
+            loadCachedRateLimits: {
+                calls.append("cache")
+                return cachedLimits
+            }
+        )
+
+        let snapshot = try plan.loadSnapshot(codexHome: "/tmp/codex", dataSource: .liveOAuth)
+
+        XCTAssertEqual(calls.values, ["app-server", "oauth", "cache"])
+        XCTAssertEqual(snapshot.rateLimits?.primary.usedPercent, 56)
+        XCTAssertEqual(snapshot.errorMessage, "Live Codex refresh failed. Showing the last good Codex reading.")
+    }
+
+    private func makeRateLimits(sourcePath: String, usedPercent: Double) -> CodexRateLimits {
+        CodexRateLimits(
+            primary: RateLimitWindow(
+                usedPercent: usedPercent,
+                windowMinutes: 300,
+                resetsAt: Date(timeIntervalSince1970: 1_779_000_000)
+            ),
+            secondary: RateLimitWindow(
+                usedPercent: usedPercent / 2,
+                windowMinutes: 10_080,
+                resetsAt: Date(timeIntervalSince1970: 1_779_604_800)
+            ),
+            credits: nil,
+            planType: "prolite",
+            capturedAt: Date(timeIntervalSince1970: 1_778_982_000),
+            sourcePath: sourcePath
+        )
+    }
+
+}
+
+private enum CodexRefreshTestError: LocalizedError {
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .failed(let message):
+            return message
+        }
+    }
+}
+
+private final class CallLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValues
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storedValues.append(value)
+        lock.unlock()
+    }
 }

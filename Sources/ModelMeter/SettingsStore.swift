@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 final class SettingsStore: @unchecked Sendable {
@@ -15,9 +16,11 @@ final class SettingsStore: @unchecked Sendable {
         static let notificationsEnabled = "notificationsEnabled"
         static let notificationThreshold = "notificationThreshold"
         static let menuBarMetric = "menuBarMetric"
+        static let menuBarDisplayMode = "menuBarDisplayMode"
         static let menuBarIconMode = "menuBarIconMode"
         static let menuBarLabelStyle = "menuBarLabelStyle"
         static let menuBarFontSize = "menuBarFontSize"
+        static let resetDisplayMode = "resetDisplayMode"
         static let claudeOrganizationID = "claudeOrganizationID"
         static let codexEnabled = "codexEnabled"
         static let claudeEnabled = "claudeEnabled"
@@ -27,6 +30,8 @@ final class SettingsStore: @unchecked Sendable {
         static let showGeminiInMenuBar = "showGeminiInMenuBar"
         static let paceWarningsEnabled = "paceWarningsEnabled"
         static let providerStatusWarningsEnabled = "providerStatusWarningsEnabled"
+        static let popoverWidth = "popoverWidth"
+        static let popoverHeight = "popoverHeight"
     }
 
     var codexHome: String {
@@ -140,6 +145,18 @@ final class SettingsStore: @unchecked Sendable {
         set { defaults.set(newValue.rawValue, forKey: Key.menuBarMetric) }
     }
 
+    var menuBarDisplayMode: MenuBarDisplayMode {
+        get {
+            guard let rawValue = defaults.string(forKey: Key.menuBarDisplayMode),
+                  let mode = MenuBarDisplayMode(rawValue: rawValue)
+            else {
+                return .allProviders
+            }
+            return mode
+        }
+        set { defaults.set(newValue.rawValue, forKey: Key.menuBarDisplayMode) }
+    }
+
     var menuBarIconMode: MenuBarIconMode {
         get {
             guard let rawValue = defaults.string(forKey: Key.menuBarIconMode),
@@ -176,9 +193,39 @@ final class SettingsStore: @unchecked Sendable {
         set { defaults.set(newValue.rawValue, forKey: Key.menuBarFontSize) }
     }
 
+    var resetDisplayMode: ResetDisplayMode {
+        get {
+            guard let rawValue = defaults.string(forKey: Key.resetDisplayMode),
+                  let mode = ResetDisplayMode(rawValue: rawValue)
+            else {
+                return .relative
+            }
+            return mode
+        }
+        set { defaults.set(newValue.rawValue, forKey: Key.resetDisplayMode) }
+    }
+
     var claudeOrganizationID: String {
         get { defaults.string(forKey: Key.claudeOrganizationID) ?? "" }
         set { defaults.set(newValue, forKey: Key.claudeOrganizationID) }
+    }
+
+    var popoverSize: CGSize? {
+        get {
+            let width = defaults.double(forKey: Key.popoverWidth)
+            let height = defaults.double(forKey: Key.popoverHeight)
+            guard width >= 360, height >= 420 else { return nil }
+            return CGSize(width: width, height: height)
+        }
+        set {
+            guard let newValue else {
+                defaults.removeObject(forKey: Key.popoverWidth)
+                defaults.removeObject(forKey: Key.popoverHeight)
+                return
+            }
+            defaults.set(newValue.width, forKey: Key.popoverWidth)
+            defaults.set(newValue.height, forKey: Key.popoverHeight)
+        }
     }
 
     private func value(for key: String, defaultValue: Int) -> Int {

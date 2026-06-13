@@ -10,14 +10,16 @@ Model Meter is designed as a local-first macOS menu bar app. It does not use an 
 
 ### Codex
 
-If Codex is enabled, Model Meter reads local Codex files from the Codex home folder you configure, normally `~/.codex`.
+If Codex is enabled, Model Meter can refresh Codex balances from either the live Codex/ChatGPT route or local Codex files, depending on the data source you select. The default is the live route because it is usually more current.
 
-The app may read:
+For live Codex checks, Model Meter may ask Codex app-server for the current account balance. If that is not available, it may use Codex's existing ChatGPT OAuth session from `auth.json` to request live 5-hour and weekly balance data from ChatGPT/OpenAI endpoints. Model Meter does not store your OpenAI password or ask for it directly.
+
+For local Codex file checks, the app may read:
 
 - `sessions/**/*.jsonl` for local Codex rate-limit snapshots.
 - `state_5.sqlite` for local token/thread usage detail, queried with `/usr/bin/sqlite3` in read-only mode.
 
-This data stays on your Mac. Model Meter does not upload Codex logs, prompts, transcripts, local databases, or usage snapshots to Abokado Labs.
+Model Meter does not upload Codex logs, prompts, transcripts, local databases, OAuth tokens, or usage snapshots to Abokado Labs.
 
 ### Claude
 
@@ -33,7 +35,7 @@ Model Meter does not send Google/Gemini session data to Abokado Labs.
 
 ## Network Access
 
-Model Meter requires network access for Claude sign-in and usage checks, Gemini sign-in and usage checks, and Sparkle update checks. Codex usage is read locally.
+Model Meter requires network access for live Codex balance checks, Claude sign-in and usage checks, Gemini sign-in and usage checks, provider status checks, and Sparkle update checks. If you choose **Local Codex files** as the Codex data source, Codex balance checks avoid the live Codex/ChatGPT balance route but can be stale or incomplete.
 
 ## Credential Storage
 

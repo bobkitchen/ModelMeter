@@ -25,7 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var updaterController: SPUStandardUpdaterController?
     private let popover = NSPopover()
     private let contextMenu = NSMenu()
-    private let popoverWidth: CGFloat = 390
+    private let defaultDashboardWidth: CGFloat = 390
+    private let minimumDashboardWidth: CGFloat = 360
+    private let minimumDashboardHeight: CGFloat = 420
     private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -60,13 +62,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = dashboardPopoverSize()
         popover.contentViewController = NSHostingController(
-            rootView: DashboardView()
-                .environmentObject(store)
-                .frame(width: popoverWidth)
+            rootView: DashboardView(onResizeDrag: { [weak self] delta in
+                Task { @MainActor in
+                    self?.resizeDashboardPopover(by: delta)
+                }
+            })
+            .environmentObject(store)
+            .frame(minWidth: minimumDashboardWidth, minHeight: minimumDashboardHeight)
         )
     }
 
     private func dashboardPopoverSize() -> NSSize {
+        if let savedSize = SettingsStore.shared.popoverSize {
+            return clampedDashboardSize(NSSize(width: savedSize.width, height: savedSize.height))
+        }
+        return defaultDashboardPopoverSize()
+    }
+
+    private func defaultDashboardPopoverSize() -> NSSize {
         var providerHeights: [CGFloat] = []
 
         if store.codexEnabled {
@@ -82,14 +95,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let providerGap = CGFloat(max(providerHeights.count - 1, 0)) * 10
         let chromeHeight: CGFloat = 104
         let contentPadding: CGFloat = 24
+        let historyHeight: CGFloat = 138
         let emptyHeight: CGFloat = providerHeights.isEmpty ? 72 : 0
-        let rawHeight = chromeHeight + contentPadding + providerGap + emptyHeight + providerHeights.reduce(0, +)
-        return NSSize(width: popoverWidth, height: clampedPopoverHeight(rawHeight))
+        let rawHeight = chromeHeight + contentPadding + historyHeight + providerGap + emptyHeight + providerHeights.reduce(0, +)
+        return clampedDashboardSize(NSSize(width: defaultDashboardWidth, height: rawHeight.rounded(.up)))
     }
 
 
     private func providerHeight(hasMessage: Bool) -> CGFloat {
-        176 + (hasMessage ? 46 : 0)
+        150 + (hasMessage ? 46 : 0)
     }
 
     private func hasVisibleMessage(_ message: String?) -> Bool {
@@ -104,10 +118,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return store.claudeSnapshot.errorMessage
     }
 
-    private func clampedPopoverHeight(_ rawHeight: CGFloat) -> CGFloat {
+    private func clampedDashboardSize(_ size: NSSize) -> NSSize {
         let visibleHeight = NSScreen.main?.visibleFrame.height ?? 800
-        let maximumHeight = max(420, visibleHeight - 80)
-        return min(max(rawHeight.rounded(.up), 420), maximumHeight)
+        let visibleWidth = NSScreen.main?.visibleFrame.width ?? 1_200
+        let maximumHeight = max(minimumDashboardHeight, visibleHeight - 80)
+        let maximumWidth = max(minimumDashboardWidth, min(760, visibleWidth - 80))
+        return NSSize(
+            width: min(max(size.width.rounded(.up), minimumDashboardWidth), maximumWidth),
+            height: min(max(size.height.rounded(.up), minimumDashboardHeight), maximumHeight)
+        )
     }
 
     private func configureContextMenu() {
@@ -156,12 +175,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let image = MenuBarImageRenderer.render(
             title: menuBarPlainTitle(),
             status: store.snapshot.status,
-            iconMode: store.menuBarIconMode,
+            iconMode: store.menuBarDisplayMode == .iconOnly ? .statusIcon : store.menuBarIconMode,
             fontSize: store.menuBarFontSize,
             labelStyle: store.menuBarLabelStyle,
-            codexWarning: store.codexMenuMetricAheadOfPace || store.codexMenuStatusWarning,
-            claudeWarning: store.claudeMenuMetricAheadOfPace || store.claudeMenuStatusWarning,
-            geminiWarning: false
+            codexWarning: codexMenuWarning,
+            claudeWarning: claudeMenuWarning,
+            geminiWarning: geminiMenuWarning
         )
         button.title = ""
         button.attributedTitle = NSAttributedString()
@@ -172,31 +191,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func menuBarPlainTitle() -> String {
-        var parts: [String] = []
+        switch store.menuBarDisplayMode {
+        case .allProviders:
+            return menuBarParts().map(\.text).joined(separator: "  ").ifEmpty("MM")
+        case .lowestAvailable:
+            return lowestAvailableMenuPart()?.text ?? "MM"
+        case .warningsOnly:
+            return menuBarParts().filter(\.warning).map(\.text).joined(separator: "  ").ifEmpty("OK")
+        case .iconOnly:
+            return ""
+        }
+    }
+
+    private func menuBarParts() -> [MenuBarPart] {
+        var parts: [MenuBarPart] = []
         if store.codexEnabled && store.showCodexInMenuBar {
-            let label = (store.codexMenuMetricAheadOfPace || store.codexMenuStatusWarning) ? "C!" : "C"
             let value = store.menuBarMetric.value(from: store.snapshot).map { UsageMath.wholePercent($0) } ?? "--"
-            parts.append("\(label) \(value)")
+            parts.append(MenuBarPart(provider: .codex, label: "C", value: value, warning: codexMenuWarning))
         }
 
         if store.claudeEnabled && store.showClaudeInMenuBar {
-            let label = (store.claudeMenuMetricAheadOfPace || store.claudeMenuStatusWarning) ? "Cl!" : "Cl"
             let value = store.menuBarMetric.value(from: store.claudeSnapshot).map { UsageMath.wholePercent($0) } ?? "--"
-            parts.append("\(label) \(value)")
+            parts.append(MenuBarPart(provider: .claude, label: "Cl", value: value, warning: claudeMenuWarning))
         }
 
         if store.geminiEnabled && store.showGeminiInMenuBar {
             let value = store.menuBarMetric.value(from: store.geminiSnapshot).map { UsageMath.wholePercent($0) } ?? "--"
-            parts.append("G \(value)")
+            parts.append(MenuBarPart(provider: .gemini, label: "G", value: value, warning: geminiMenuWarning))
         }
 
-        return parts.isEmpty ? "MM" : parts.joined(separator: "  ")
+        return parts
+    }
+
+    private func lowestAvailableMenuPart() -> MenuBarPart? {
+        let metric = availableMetricForCompactMode()
+        return menuBarParts()
+            .compactMap { part -> (part: MenuBarPart, value: Double)? in
+                guard let value = menuBarValue(provider: part.provider, metric: metric) else { return nil }
+                return (
+                    MenuBarPart(
+                        provider: part.provider,
+                        label: part.label,
+                        value: UsageMath.wholePercent(value),
+                        warning: part.warning
+                    ),
+                    value
+                )
+            }
+            .min { $0.value < $1.value }?
+            .part
+    }
+
+    private func availableMetricForCompactMode() -> MenuBarMetric {
+        switch store.menuBarMetric {
+        case .fiveHourUsed, .fiveHourAvailable:
+            return .fiveHourAvailable
+        case .sevenDayUsed, .sevenDayAvailable:
+            return .sevenDayAvailable
+        }
+    }
+
+    private func menuBarValue(provider: ProviderKind, metric: MenuBarMetric) -> Double? {
+        switch provider {
+        case .codex:
+            return metric.value(from: store.snapshot)
+        case .claude:
+            return metric.value(from: store.claudeSnapshot)
+        case .gemini:
+            return metric.value(from: store.geminiSnapshot)
+        }
+    }
+
+    private var codexMenuWarning: Bool {
+        store.codexMenuMetricAheadOfPace || store.codexMenuStatusWarning
+    }
+
+    private var claudeMenuWarning: Bool {
+        store.claudeMenuMetricAheadOfPace || store.claudeMenuStatusWarning
+    }
+
+    private var geminiMenuWarning: Bool {
+        store.geminiMenuMetricAheadOfPace || store.geminiMenuStatusWarning
     }
 
     private func menuBarToolTip() -> String {
         var lines = ["Model Meter"]
-        for status in [store.providerStatuses.codex, store.providerStatuses.claude, store.providerStatuses.gemini] where status.hasIssue {
-            lines.append("\(status.provider.rawValue): \(status.severity.title) - \(status.displayMessage)")
+        if store.providerStatusWarningsEnabled {
+            for status in [store.providerStatuses.codex, store.providerStatuses.claude, store.providerStatuses.gemini] where status.hasIssue {
+                lines.append("\(status.provider.rawValue): \(status.severity.title) - \(status.displayMessage)")
+            }
         }
         return lines.joined(separator: "\n")
     }
@@ -221,7 +304,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func resizeVisiblePopoverIfNeeded() {
         guard popover.isShown else { return }
-        popover.contentSize = dashboardPopoverSize()
+        if SettingsStore.shared.popoverSize == nil {
+            popover.contentSize = defaultDashboardPopoverSize()
+        }
+    }
+
+    private func resizeDashboardPopover(by delta: CGSize) {
+        guard popover.isShown else { return }
+        let current = popover.contentSize
+        let next = clampedDashboardSize(NSSize(
+            width: current.width + delta.width,
+            height: current.height + delta.height
+        ))
+        popover.contentSize = next
+        SettingsStore.shared.popoverSize = CGSize(width: next.width, height: next.height)
     }
 
     private func showSettingsWindow() {
@@ -259,5 +355,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func quitFromMenu(_ sender: Any?) {
         NSApplication.shared.terminate(sender)
+    }
+}
+
+private struct MenuBarPart {
+    let provider: ProviderKind
+    let label: String
+    let value: String
+    let warning: Bool
+
+    var text: String {
+        "\(label)\(warning ? "!" : "") \(value)"
+    }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String {
+        isEmpty ? fallback : self
     }
 }
