@@ -25,6 +25,12 @@ final class UsageStore: ObservableObject {
     @Published var menuBarLabelStyle: MenuBarLabelStyle
     @Published var menuBarFontSize: MenuBarFontSize
     @Published var resetDisplayMode: ResetDisplayMode
+    @Published var showHistoryGraph: Bool
+    @Published var showCodexInHistoryGraph: Bool
+    @Published var showClaudeInHistoryGraph: Bool
+    @Published var showGeminiInHistoryGraph: Bool
+    @Published var shadeHistoryGraphArea: Bool
+    @Published var historyGraphPosition: HistoryGraphPosition
     @Published var codexEnabled: Bool
     @Published var claudeEnabled: Bool
     @Published var geminiEnabled: Bool
@@ -68,6 +74,12 @@ final class UsageStore: ObservableObject {
         menuBarLabelStyle = settings.menuBarLabelStyle
         menuBarFontSize = settings.menuBarFontSize
         resetDisplayMode = settings.resetDisplayMode
+        showHistoryGraph = settings.showHistoryGraph
+        showCodexInHistoryGraph = settings.showCodexInHistoryGraph
+        showClaudeInHistoryGraph = settings.showClaudeInHistoryGraph
+        showGeminiInHistoryGraph = settings.showGeminiInHistoryGraph
+        shadeHistoryGraphArea = settings.shadeHistoryGraphArea
+        historyGraphPosition = settings.historyGraphPosition
         codexEnabled = settings.codexEnabled
         claudeEnabled = settings.claudeEnabled
         geminiEnabled = settings.geminiEnabled
@@ -155,6 +167,20 @@ final class UsageStore: ObservableObject {
 
     var geminiMenuStatusWarning: Bool {
         providerStatusWarningsEnabled && providerStatuses.gemini.hasIssue
+    }
+
+    var historyGraphProviders: [ProviderKind] {
+        var providers: [ProviderKind] = []
+        if codexEnabled && showCodexInHistoryGraph {
+            providers.append(.codex)
+        }
+        if claudeEnabled && showClaudeInHistoryGraph {
+            providers.append(.claude)
+        }
+        if geminiEnabled && showGeminiInHistoryGraph {
+            providers.append(.gemini)
+        }
+        return providers
     }
 
     func start() {
@@ -288,6 +314,12 @@ final class UsageStore: ObservableObject {
         settings.menuBarLabelStyle = menuBarLabelStyle
         settings.menuBarFontSize = menuBarFontSize
         settings.resetDisplayMode = resetDisplayMode
+        settings.showHistoryGraph = showHistoryGraph
+        settings.showCodexInHistoryGraph = showCodexInHistoryGraph
+        settings.showClaudeInHistoryGraph = showClaudeInHistoryGraph
+        settings.showGeminiInHistoryGraph = showGeminiInHistoryGraph
+        settings.shadeHistoryGraphArea = shadeHistoryGraphArea
+        settings.historyGraphPosition = historyGraphPosition
         settings.codexEnabled = codexEnabled
         settings.claudeEnabled = claudeEnabled
         settings.geminiEnabled = geminiEnabled

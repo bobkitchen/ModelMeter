@@ -18,11 +18,9 @@ struct DashboardView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    UsageHistorySection(
-                        entries: store.history,
-                        range: $historyRange,
-                        labelStyle: store.menuBarLabelStyle
-                    )
+                    if store.showHistoryGraph, store.historyGraphPosition == .top {
+                        historyGraph
+                    }
 
                     ForEach(providerCards) { card in
                         ProviderZone(card: card)
@@ -30,6 +28,10 @@ struct DashboardView: View {
 
                     if providerCards.isEmpty {
                         EmptyState(text: "All providers are switched off in settings.")
+                    }
+
+                    if store.showHistoryGraph, store.historyGraphPosition == .bottom {
+                        historyGraph
                     }
                 }
                 .padding(12)
@@ -46,6 +48,16 @@ struct DashboardView: View {
         .onReceive(minuteTimer) { value in
             now = value
         }
+    }
+
+    private var historyGraph: some View {
+        UsageHistorySection(
+            entries: store.history,
+            range: $historyRange,
+            labelStyle: store.menuBarLabelStyle,
+            visibleProviders: store.historyGraphProviders,
+            shadeArea: store.shadeHistoryGraphArea
+        )
     }
 
     private var providerCards: [ProviderCardModel] {
@@ -286,9 +298,11 @@ private struct DashboardResizeHandle: View {
     @State private var lastTranslation: CGSize = .zero
 
     var body: some View {
-        Image(systemName: "arrow.down.right.and.arrow.up.left")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.secondary.opacity(0.85))
+        ResizeGripMark()
+            .stroke(
+                Color.secondary.opacity(0.85),
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+            )
             .frame(width: 20, height: 20)
             .contentShape(Rectangle())
             .help("Drag to resize")
@@ -306,6 +320,17 @@ private struct DashboardResizeHandle: View {
                         lastTranslation = .zero
                     }
             )
+    }
+}
+
+private struct ResizeGripMark: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + rect.width * 0.34, y: rect.maxY - rect.height * 0.20))
+        path.addLine(to: CGPoint(x: rect.maxX - rect.width * 0.20, y: rect.minY + rect.height * 0.34))
+        path.move(to: CGPoint(x: rect.minX + rect.width * 0.60, y: rect.maxY - rect.height * 0.20))
+        path.addLine(to: CGPoint(x: rect.maxX - rect.width * 0.20, y: rect.minY + rect.height * 0.60))
+        return path
     }
 }
 
@@ -353,10 +378,10 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
         }
     }
 
-    var summaryLabel: String {
+    var chartTitle: String {
         switch self {
-        case .day: return "Hourly 5-hour usage"
-        case .week: return "Daily peak 5-hour usage"
+        case .day: return "5-hour usage by hour"
+        case .week: return "5-hour peak by day"
         }
     }
 }
@@ -365,19 +390,21 @@ private struct UsageHistorySection: View {
     let entries: [UsageHistoryEntry]
     @Binding var range: HistoryRange
     let labelStyle: MenuBarLabelStyle
+    let visibleProviders: [ProviderKind]
+    let shadeArea: Bool
 
     private var visibleEntries: [UsageHistoryEntry] {
         let cutoff = Date().addingTimeInterval(-range.interval)
-        return entries.filter { $0.capturedAt >= cutoff }
+        return entries.filter { $0.capturedAt >= cutoff && visibleProviders.contains($0.provider) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("History")
-                    .font(.caption.weight(.semibold))
-                    .textCase(.uppercase)
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .center) {
+                Text(range.chartTitle)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
                 Spacer()
                 Picker("History range", selection: $range) {
                     ForEach(HistoryRange.allCases) { range in
@@ -388,6 +415,7 @@ private struct UsageHistorySection: View {
                 .pickerStyle(.segmented)
                 .frame(width: 112)
             }
+            .padding(.trailing, UsageHistoryChart.plotTrailingInset)
 
             if visibleEntries.isEmpty {
                 Text("Waiting for readings")
@@ -395,9 +423,9 @@ private struct UsageHistorySection: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 84)
             } else {
-                UsageHistoryChart(entries: visibleEntries, range: range)
+                UsageHistoryChart(entries: visibleEntries, range: range, visibleProviders: visibleProviders, shadeArea: shadeArea)
                     .frame(height: 118)
-                HistorySummary(entries: visibleEntries, range: range, labelStyle: labelStyle)
+                HistorySummary(entries: visibleEntries, range: range, labelStyle: labelStyle, visibleProviders: visibleProviders)
             }
         }
         .padding(10)
@@ -408,8 +436,13 @@ private struct UsageHistorySection: View {
 private struct UsageHistoryChart: View {
     let entries: [UsageHistoryEntry]
     let range: HistoryRange
+    let visibleProviders: [ProviderKind]
+    let shadeArea: Bool
 
-    private let plotInsets = EdgeInsets(top: 6, leading: 42, bottom: 18, trailing: 4)
+    static let plotLeadingInset: CGFloat = 38
+    static let plotTrailingInset: CGFloat = 4
+
+    private let plotInsets = EdgeInsets(top: 6, leading: UsageHistoryChart.plotLeadingInset, bottom: 18, trailing: UsageHistoryChart.plotTrailingInset)
     private let axisLabelColor = Color.secondary.opacity(0.62)
 
     var body: some View {
@@ -425,7 +458,7 @@ private struct UsageHistoryChart: View {
             ZStack(alignment: .topLeading) {
                 Canvas { context, _ in
                     drawGrid(context: &context, plotRect: plotRect)
-                    for provider in ProviderKind.allCases {
+                    for provider in visibleProviders {
                         drawSeries(provider: provider, context: &context, plotRect: plotRect)
                     }
                 }
@@ -466,13 +499,22 @@ private struct UsageHistoryChart: View {
             for point in points.dropFirst() {
                 path.addLine(to: point)
             }
+            if shadeArea {
+                var areaPath = path
+                if let last = points.last {
+                    areaPath.addLine(to: CGPoint(x: last.x, y: plotRect.maxY))
+                    areaPath.addLine(to: CGPoint(x: points[0].x, y: plotRect.maxY))
+                    areaPath.closeSubpath()
+                    context.fill(areaPath, with: .color(provider.chartColor.opacity(0.16)))
+                }
+            }
             context.stroke(path, with: .color(provider.chartColor), lineWidth: 2)
         }
 
         for point in points {
-            let rect = CGRect(x: point.x - 3.5, y: point.y - 3.5, width: 7, height: 7)
+            let rect = CGRect(x: point.x - 2.4, y: point.y - 2.4, width: 4.8, height: 4.8)
             context.fill(Path(ellipseIn: rect), with: .color(provider.chartColor))
-            context.stroke(Path(ellipseIn: rect.insetBy(dx: -1, dy: -1)), with: .color(Color(nsColor: .controlBackgroundColor)), lineWidth: 1)
+            context.stroke(Path(ellipseIn: rect.insetBy(dx: -0.8, dy: -0.8)), with: .color(Color(nsColor: .controlBackgroundColor)), lineWidth: 0.75)
         }
     }
 
@@ -484,7 +526,7 @@ private struct UsageHistoryChart: View {
                     .foregroundStyle(axisLabelColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                    .frame(width: plotInsets.leading - 8, alignment: .trailing)
+                    .frame(width: plotInsets.leading - 8, alignment: .leading)
                     .position(
                         x: (plotInsets.leading - 8) / 2,
                         y: plotRect.maxY - (plotRect.height * CGFloat(value) / 100)
@@ -565,25 +607,23 @@ private struct HistorySummary: View {
     let entries: [UsageHistoryEntry]
     let range: HistoryRange
     let labelStyle: MenuBarLabelStyle
+    let visibleProviders: [ProviderKind]
 
     var body: some View {
-        HStack(spacing: 10) {
-            ForEach(ProviderKind.allCases) { provider in
+        HStack(spacing: 14) {
+            ForEach(visibleProviders) { provider in
                 if entries.contains(where: { $0.provider == provider }) {
-                    Label {
+                    HStack(spacing: 5) {
                         ProviderLegendMark(provider: provider, labelStyle: labelStyle)
-                    } icon: {
                         Circle()
                             .fill(provider.chartColor)
-                            .frame(width: 7, height: 7)
+                            .frame(width: 8, height: 8)
                     }
+                    .accessibilityLabel(provider.rawValue)
                     .help(provider.rawValue)
                 }
             }
             Spacer(minLength: 0)
-            Text(range.summaryLabel)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
     }
 }
@@ -596,7 +636,7 @@ private struct ProviderLegendMark: View {
         switch labelStyle {
         case .letters:
             Text(provider.shortLabel)
-                .font(.caption2.weight(.semibold))
+                .font(.caption.weight(.semibold))
         case .icons:
             if let image = provider.legendImage {
                 Image(nsImage: image)
@@ -604,10 +644,10 @@ private struct ProviderLegendMark: View {
                     .renderingMode(.template)
                     .foregroundStyle(.primary)
                     .scaledToFit()
-                    .frame(width: 13, height: 13)
+                    .frame(width: 16, height: 16)
             } else {
                 Text(provider.shortLabel)
-                    .font(.caption2.weight(.semibold))
+                    .font(.caption.weight(.semibold))
             }
         }
     }

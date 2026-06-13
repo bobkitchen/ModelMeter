@@ -21,6 +21,12 @@ final class SettingsStore: @unchecked Sendable {
         static let menuBarLabelStyle = "menuBarLabelStyle"
         static let menuBarFontSize = "menuBarFontSize"
         static let resetDisplayMode = "resetDisplayMode"
+        static let showHistoryGraph = "showHistoryGraph"
+        static let showCodexInHistoryGraph = "showCodexInHistoryGraph"
+        static let showClaudeInHistoryGraph = "showClaudeInHistoryGraph"
+        static let showGeminiInHistoryGraph = "showGeminiInHistoryGraph"
+        static let shadeHistoryGraphArea = "shadeHistoryGraphArea"
+        static let historyGraphPosition = "historyGraphPosition"
         static let claudeOrganizationID = "claudeOrganizationID"
         static let codexEnabled = "codexEnabled"
         static let claudeEnabled = "claudeEnabled"
@@ -203,6 +209,43 @@ final class SettingsStore: @unchecked Sendable {
             return mode
         }
         set { defaults.set(newValue.rawValue, forKey: Key.resetDisplayMode) }
+    }
+
+    var showHistoryGraph: Bool {
+        get { defaults.object(forKey: Key.showHistoryGraph) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.showHistoryGraph) }
+    }
+
+    var showCodexInHistoryGraph: Bool {
+        get { defaults.object(forKey: Key.showCodexInHistoryGraph) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.showCodexInHistoryGraph) }
+    }
+
+    var showClaudeInHistoryGraph: Bool {
+        get { defaults.object(forKey: Key.showClaudeInHistoryGraph) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.showClaudeInHistoryGraph) }
+    }
+
+    var showGeminiInHistoryGraph: Bool {
+        get { defaults.object(forKey: Key.showGeminiInHistoryGraph) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.showGeminiInHistoryGraph) }
+    }
+
+    var shadeHistoryGraphArea: Bool {
+        get { defaults.object(forKey: Key.shadeHistoryGraphArea) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.shadeHistoryGraphArea) }
+    }
+
+    var historyGraphPosition: HistoryGraphPosition {
+        get {
+            guard let rawValue = defaults.string(forKey: Key.historyGraphPosition),
+                  let position = HistoryGraphPosition(rawValue: rawValue)
+            else {
+                return .top
+            }
+            return position
+        }
+        set { defaults.set(newValue.rawValue, forKey: Key.historyGraphPosition) }
     }
 
     var claudeOrganizationID: String {

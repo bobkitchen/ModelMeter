@@ -65,6 +65,8 @@ struct SettingsView: View {
             providersTab
         case .menuBar:
             menuBarTab
+        case .graph:
+            graphTab
         case .updatesPrivacy:
             updatesPrivacyTab
         }
@@ -223,6 +225,40 @@ struct SettingsView: View {
 
             SettingsSection("Preview") {
                 SettingValueRow(title: "Current menu bar", value: store.menuTitle)
+            }
+        }
+    }
+
+    private var graphTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSection("Graph") {
+                Toggle("Show graph in dashboard", isOn: $store.showHistoryGraph)
+                helperText("Shows or hides the 24-hour and 7-day usage graph at the top of the menu bar popover.")
+
+                Picker("Position", selection: $store.historyGraphPosition) {
+                    ForEach(HistoryGraphPosition.allCases) { position in
+                        Text(position.title).tag(position)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!store.showHistoryGraph)
+                helperText("Choose whether the graph appears above or below the provider cards in the popover.")
+            }
+
+            SettingsSection("Providers") {
+                Toggle("Show Codex", isOn: $store.showCodexInHistoryGraph)
+                    .disabled(!store.showHistoryGraph || !store.codexEnabled)
+                Toggle("Show Claude", isOn: $store.showClaudeInHistoryGraph)
+                    .disabled(!store.showHistoryGraph || !store.claudeEnabled)
+                Toggle("Show Gemini", isOn: $store.showGeminiInHistoryGraph)
+                    .disabled(!store.showHistoryGraph || !store.geminiEnabled)
+                helperText("Hidden providers are removed from both the plotted lines and the legend. Provider collection still follows the Providers tab.")
+            }
+
+            SettingsSection("Style") {
+                Toggle("Shade area below plotted lines", isOn: $store.shadeHistoryGraphArea)
+                    .disabled(!store.showHistoryGraph)
+                helperText("Adds a subtle fill under each visible line. This is clearest when one provider is selected.")
             }
         }
     }
@@ -389,6 +425,7 @@ struct SettingsView: View {
 private enum SettingsTab: CaseIterable, Identifiable {
     case providers
     case menuBar
+    case graph
     case updatesPrivacy
 
     var id: Self { self }
@@ -397,6 +434,7 @@ private enum SettingsTab: CaseIterable, Identifiable {
         switch self {
         case .providers: return "Providers"
         case .menuBar: return "Menu Bar"
+        case .graph: return "Graph"
         case .updatesPrivacy: return "Updates & Support"
         }
     }
@@ -405,6 +443,7 @@ private enum SettingsTab: CaseIterable, Identifiable {
         switch self {
         case .providers: return "server.rack"
         case .menuBar: return "menubar.rectangle"
+        case .graph: return "chart.xyaxis.line"
         case .updatesPrivacy: return "questionmark.circle"
         }
     }

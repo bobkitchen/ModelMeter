@@ -191,6 +191,20 @@ enum ProviderKind: String, CaseIterable, Identifiable, Codable {
     var id: Self { self }
 }
 
+enum HistoryGraphPosition: String, CaseIterable, Identifiable {
+    case top
+    case bottom
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .top: return "Top"
+        case .bottom: return "Bottom"
+        }
+    }
+}
+
 enum ProviderStatusSeverity: String, Comparable {
     case unknown
     case operational

@@ -95,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let providerGap = CGFloat(max(providerHeights.count - 1, 0)) * 10
         let chromeHeight: CGFloat = 104
         let contentPadding: CGFloat = 24
-        let historyHeight: CGFloat = 138
+        let historyHeight: CGFloat = store.showHistoryGraph ? 138 : 0
         let emptyHeight: CGFloat = providerHeights.isEmpty ? 72 : 0
         let rawHeight = chromeHeight + contentPadding + historyHeight + providerGap + emptyHeight + providerHeights.reduce(0, +)
         return clampedDashboardSize(NSSize(width: defaultDashboardWidth, height: rawHeight.rounded(.up)))
