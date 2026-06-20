@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct DashboardView: View {
+    @Environment(\.openSettings) private var openSettings
     @EnvironmentObject private var store: UsageStore
     @State private var now = Date()
     @State private var historyRange: HistoryRange = .day
@@ -39,7 +40,8 @@ struct DashboardView: View {
             Divider()
             footer
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial)
         .overlay(alignment: .bottomTrailing) {
             DashboardResizeHandle(onResizeDrag: onResizeDrag)
                 .padding(.trailing, 5)
@@ -47,6 +49,11 @@ struct DashboardView: View {
         }
         .onReceive(minuteTimer) { value in
             now = value
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openSettingsScene)) { _ in
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
+            SettingsWindowFocus.bringForwardSoon()
         }
     }
 
@@ -56,7 +63,8 @@ struct DashboardView: View {
             range: $historyRange,
             labelStyle: store.menuBarLabelStyle,
             visibleProviders: store.historyGraphProviders,
-            shadeArea: store.shadeHistoryGraphArea
+            shadeArea: store.shadeHistoryGraphArea,
+            now: now
         )
     }
 
@@ -137,7 +145,7 @@ struct DashboardView: View {
                 Label(issue.severity.title, systemImage: issue.severity.symbolName)
                     .labelStyle(.iconOnly)
                     .foregroundStyle(issue.severity.color)
-                    .help("\(issue.provider.rawValue): \(issue.displayMessage)")
+                    .help(issue.plainExplanation)
             }
             Spacer()
             Button {
@@ -159,7 +167,12 @@ struct DashboardView: View {
                 .foregroundStyle(.secondary)
             Spacer()
             Button {
-                NSApp.sendAction(#selector(AppDelegate.openSettings(_:)), to: nil, from: nil)
+                NSApp.activate(ignoringOtherApps: true)
+                openSettings()
+                SettingsWindowFocus.bringForwardSoon()
+                DispatchQueue.main.async {
+                    NSApp.sendAction(#selector(AppDelegate.closePopover(_:)), to: nil, from: nil)
+                }
             } label: {
                 Image(systemName: "gearshape")
             }
@@ -193,7 +206,7 @@ struct DashboardView: View {
 
     private var codexConnectionText: String {
         guard let rateLimits = store.snapshot.rateLimits else { return "Waiting for Codex reading" }
-        return "Connected to \(rateLimits.displayPlan) via \(rateLimits.sourceLabel)"
+        return "\(rateLimits.displayPlan) via \(rateLimits.sourceLabel)"
     }
 
     private var codexReadingQuality: ProviderReadingQuality {
@@ -227,7 +240,7 @@ struct DashboardView: View {
     private var claudeConnectionText: String {
         if store.claudeOrganizationID.isEmpty { return "Not connected" }
         if store.claudeSnapshot.rateLimits == nil { return "Configured; waiting for Claude reading" }
-        return "Connected via authenticated Claude usage"
+        return "authenticated Claude usage"
     }
 
     private var claudeMessage: String? {
@@ -265,12 +278,12 @@ struct DashboardView: View {
     private var geminiConnectionText: String {
         if !geminiConfigured { return "Not connected" }
         if let accountPlan = store.geminiSnapshot.accountPlan, !accountPlan.isEmpty {
-            return "Connected to \(accountPlan) via Gemini usage page"
+            return "\(accountPlan) via Gemini usage"
         }
         if let accountEmail = store.geminiSnapshot.accountEmail, !accountEmail.isEmpty {
-            return "Connected to \(accountEmail) via Gemini usage page"
+            return "\(accountEmail) via Gemini usage"
         }
-        return "Connected via Gemini usage page"
+        return "Gemini usage page"
     }
 
     private var geminiMessage: String? {
@@ -371,17 +384,10 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
         }
     }
 
-    var bucketInterval: TimeInterval {
-        switch self {
-        case .day: return 60 * 60
-        case .week: return 24 * 60 * 60
-        }
-    }
-
     var chartTitle: String {
         switch self {
-        case .day: return "5-hour usage by hour"
-        case .week: return "5-hour peak by day"
+        case .day: return "5-hour usage over 24h"
+        case .week: return "5-hour usage over 7d"
         }
     }
 }
@@ -392,10 +398,16 @@ private struct UsageHistorySection: View {
     let labelStyle: MenuBarLabelStyle
     let visibleProviders: [ProviderKind]
     let shadeArea: Bool
+    let now: Date
 
-    private var visibleEntries: [UsageHistoryEntry] {
-        let cutoff = Date().addingTimeInterval(-range.interval)
-        return entries.filter { $0.capturedAt >= cutoff && visibleProviders.contains($0.provider) }
+    private var graphData: HistoryGraphData {
+        HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: visibleProviders,
+            rangeInterval: range.interval,
+            now: now,
+            gapThreshold: UsageHistoryStore.gapDisplayThreshold
+        )
     }
 
     var body: some View {
@@ -417,27 +429,27 @@ private struct UsageHistorySection: View {
             }
             .padding(.trailing, UsageHistoryChart.plotTrailingInset)
 
-            if visibleEntries.isEmpty {
-                Text("Waiting for readings")
+            if !graphData.hasEnoughForChart {
+                Text("Waiting for more readings")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 84)
             } else {
-                UsageHistoryChart(entries: visibleEntries, range: range, visibleProviders: visibleProviders, shadeArea: shadeArea)
+                UsageHistoryChart(graphData: graphData, range: range, shadeArea: shadeArea, now: now)
                     .frame(height: 118)
-                HistorySummary(entries: visibleEntries, range: range, labelStyle: labelStyle, visibleProviders: visibleProviders)
+                HistorySummary(graphData: graphData, labelStyle: labelStyle)
             }
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
 private struct UsageHistoryChart: View {
-    let entries: [UsageHistoryEntry]
+    let graphData: HistoryGraphData
     let range: HistoryRange
-    let visibleProviders: [ProviderKind]
     let shadeArea: Bool
+    let now: Date
 
     static let plotLeadingInset: CGFloat = 38
     static let plotTrailingInset: CGFloat = 4
@@ -458,8 +470,8 @@ private struct UsageHistoryChart: View {
             ZStack(alignment: .topLeading) {
                 Canvas { context, _ in
                     drawGrid(context: &context, plotRect: plotRect)
-                    for provider in visibleProviders {
-                        drawSeries(provider: provider, context: &context, plotRect: plotRect)
+                    for series in graphData.series {
+                        drawSeries(series, context: &context, plotRect: plotRect)
                     }
                 }
                 yAxisLabels(plotRect: plotRect)
@@ -479,43 +491,84 @@ private struct UsageHistoryChart: View {
         }
     }
 
-    private func drawSeries(provider: ProviderKind, context: inout GraphicsContext, plotRect: CGRect) {
-        let start = Date().addingTimeInterval(-range.interval)
-        let points = historyPoints(provider: provider)
-            .compactMap { point -> CGPoint? in
-                let xProgress = point.date.timeIntervalSince(start) / range.interval
-                guard xProgress >= 0, xProgress <= 1 else { return nil }
-                let yProgress = min(max(point.usedPercent / 100, 0), 1)
-                let x = plotRect.minX + plotRect.width * CGFloat(xProgress)
-                let y = plotRect.maxY - (plotRect.height * CGFloat(yProgress))
-                return CGPoint(x: x, y: y)
-            }
-
-        guard !points.isEmpty else { return }
-
-        if points.count > 1 {
-            var path = Path()
-            path.move(to: points[0])
-            for point in points.dropFirst() {
-                path.addLine(to: point)
-            }
-            if shadeArea {
-                var areaPath = path
-                if let last = points.last {
-                    areaPath.addLine(to: CGPoint(x: last.x, y: plotRect.maxY))
-                    areaPath.addLine(to: CGPoint(x: points[0].x, y: plotRect.maxY))
-                    areaPath.closeSubpath()
-                    context.fill(areaPath, with: .color(provider.chartColor.opacity(0.16)))
-                }
-            }
-            context.stroke(path, with: .color(provider.chartColor), lineWidth: 2)
+    private func drawSeries(_ series: HistoryGraphSeries, context: inout GraphicsContext, plotRect: CGRect) {
+        let start = now.addingTimeInterval(-range.interval)
+        let points = series.points.map { point -> CGPoint? in
+            let xProgress = point.date.timeIntervalSince(start) / range.interval
+            guard xProgress >= 0, xProgress <= 1 else { return nil }
+            let yProgress = min(max(point.usedPercent / 100, 0), 1)
+            let x = plotRect.minX + plotRect.width * CGFloat(xProgress)
+            let y = plotRect.maxY - (plotRect.height * CGFloat(yProgress))
+            return CGPoint(x: x, y: y)
         }
 
-        for point in points {
-            let rect = CGRect(x: point.x - 2.4, y: point.y - 2.4, width: 4.8, height: 4.8)
-            context.fill(Path(ellipseIn: rect), with: .color(provider.chartColor))
-            context.stroke(Path(ellipseIn: rect.insetBy(dx: -0.8, dy: -0.8)), with: .color(Color(nsColor: .controlBackgroundColor)), lineWidth: 0.75)
+        guard points.contains(where: { $0 != nil }) else { return }
+
+        for segment in series.segments where segment.isGap {
+            guard let startPoint = chartPoint(at: segment.startIndex, in: points),
+                  let endPoint = chartPoint(at: segment.endIndex, in: points) else { continue }
+            let band = CGRect(
+                x: min(startPoint.x, endPoint.x),
+                y: plotRect.minY,
+                width: abs(endPoint.x - startPoint.x),
+                height: plotRect.height
+            )
+            if band.width > 1 {
+                var bandPath = Path()
+                bandPath.addRect(band)
+                context.fill(bandPath, with: .color(Color.secondary.opacity(0.035)))
+            }
         }
+
+        if shadeArea {
+            for segment in series.segments where !segment.isGap {
+                guard let startPoint = chartPoint(at: segment.startIndex, in: points),
+                      let endPoint = chartPoint(at: segment.endIndex, in: points) else { continue }
+                context.fill(
+                    stepAreaPath(from: startPoint, to: endPoint, baseline: plotRect.maxY),
+                    with: .color(series.provider.chartColor.opacity(0.10))
+                )
+            }
+        }
+
+        for segment in series.segments {
+            guard let startPoint = chartPoint(at: segment.startIndex, in: points),
+                  let endPoint = chartPoint(at: segment.endIndex, in: points) else { continue }
+            let style = StrokeStyle(
+                lineWidth: 2,
+                lineCap: .round,
+                lineJoin: .round,
+                dash: segment.isGap ? [1.5, 4] : []
+            )
+            context.stroke(stepPath(from: startPoint, to: endPoint), with: .color(series.provider.chartColor), style: style)
+        }
+
+        for point in points.compactMap({ $0 }) {
+            let rect = CGRect(x: point.x - 1.9, y: point.y - 1.9, width: 3.8, height: 3.8)
+            context.fill(Path(ellipseIn: rect), with: .color(series.provider.chartColor))
+            context.stroke(Path(ellipseIn: rect.insetBy(dx: -0.8, dy: -0.8)), with: .color(Color.primary.opacity(0.16)), lineWidth: 0.75)
+        }
+    }
+
+    private func stepPath(from start: CGPoint, to end: CGPoint) -> Path {
+        var path = Path()
+        path.move(to: start)
+        path.addLine(to: CGPoint(x: end.x, y: start.y))
+        path.addLine(to: end)
+        return path
+    }
+
+    private func stepAreaPath(from start: CGPoint, to end: CGPoint, baseline: CGFloat) -> Path {
+        var path = stepPath(from: start, to: end)
+        path.addLine(to: CGPoint(x: end.x, y: baseline))
+        path.addLine(to: CGPoint(x: start.x, y: baseline))
+        path.closeSubpath()
+        return path
+    }
+
+    private func chartPoint(at index: Int, in points: [CGPoint?]) -> CGPoint? {
+        guard points.indices.contains(index) else { return nil }
+        return points[index]
     }
 
     private func yAxisLabels(plotRect: CGRect) -> some View {
@@ -537,7 +590,7 @@ private struct UsageHistoryChart: View {
 
     private func xAxisLabels(plotRect: CGRect) -> some View {
         ZStack(alignment: .topLeading) {
-            ForEach(xAxisTicks(), id: \.offset) { tick in
+            ForEach(xAxisTicks(now: now), id: \.offset) { tick in
                 Text(tick.label)
                     .font(.system(size: 9, weight: .medium, design: .rounded).monospacedDigit())
                     .foregroundStyle(axisLabelColor)
@@ -566,53 +619,16 @@ private struct UsageHistoryChart: View {
         }
     }
 
-    private func historyPoints(provider: ProviderKind) -> [HistoryPoint] {
-        let calendar = Calendar.current
-        let grouped = Dictionary(grouping: entries.filter { $0.provider == provider && $0.primaryUsedPercent != nil }) { entry in
-            bucketStart(for: entry.capturedAt, calendar: calendar)
-        }
-
-        return grouped
-            .compactMap { bucketStart, bucketEntries -> HistoryPoint? in
-                let values = bucketEntries.compactMap(\.primaryUsedPercent)
-                guard !values.isEmpty else { return nil }
-                let used: Double
-                switch range {
-                case .day:
-                    used = values.reduce(0, +) / Double(values.count)
-                case .week:
-                    used = values.max() ?? 0
-                }
-                return HistoryPoint(date: bucketStart.addingTimeInterval(range.bucketInterval / 2), usedPercent: used)
-            }
-            .sorted { $0.date < $1.date }
-    }
-
-    private func bucketStart(for date: Date, calendar: Calendar) -> Date {
-        switch range {
-        case .day:
-            return calendar.dateInterval(of: .hour, for: date)?.start ?? date
-        case .week:
-            return calendar.startOfDay(for: date)
-        }
-    }
-}
-
-private struct HistoryPoint {
-    let date: Date
-    let usedPercent: Double
 }
 
 private struct HistorySummary: View {
-    let entries: [UsageHistoryEntry]
-    let range: HistoryRange
+    let graphData: HistoryGraphData
     let labelStyle: MenuBarLabelStyle
-    let visibleProviders: [ProviderKind]
 
     var body: some View {
-        HStack(spacing: 14) {
-            ForEach(visibleProviders) { provider in
-                if entries.contains(where: { $0.provider == provider }) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 14) {
+                ForEach(graphData.series.map(\.provider)) { provider in
                     HStack(spacing: 5) {
                         ProviderLegendMark(provider: provider, labelStyle: labelStyle)
                         Circle()
@@ -622,8 +638,21 @@ private struct HistorySummary: View {
                     .accessibilityLabel(provider.rawValue)
                     .help(provider.rawValue)
                 }
+                Spacer(minLength: 0)
+                if graphData.containsGap {
+                    Text("Dotted = no readings >30m")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
-            Spacer(minLength: 0)
+
+            if let latestGapCaption = graphData.latestGapCaption {
+                Text(latestGapCaption)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
         }
     }
 }
@@ -874,10 +903,15 @@ private struct ProviderZone: View {
             ConnectionStatusLine(
                 text: card.connectionText,
                 updatedText: card.updatedText,
-                quality: card.readingQuality
+                quality: card.readingQuality,
+                operationalStatus: card.operationalStatus
             )
+
             if card.operationalStatus.hasIssue {
-                OperationalStatusLine(status: card.operationalStatus)
+                ProviderStatusContextLine(
+                    status: card.operationalStatus,
+                    quality: card.readingQuality
+                )
             }
 
             if let message = card.message, !message.isEmpty {
@@ -888,7 +922,7 @@ private struct ProviderZone: View {
             }
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -945,55 +979,78 @@ private struct ConnectionStatusLine: View {
     let text: String
     let updatedText: String
     let quality: ProviderReadingQuality
+    let operationalStatus: ProviderOperationalStatus
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: quality.symbolName)
+            Image(systemName: symbolName)
                 .font(.caption2)
-                .foregroundStyle(quality.color)
-            Text(text)
+                .foregroundStyle(symbolColor)
+                .fixedSize()
+            Text(trustText)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(trustTextColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(1)
             Spacer(minLength: 8)
             Text(updatedText)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
-        .help("\(quality.displayText). Updated \(updatedText).")
-    }
-}
-
-private struct OperationalStatusLine: View {
-    let status: ProviderOperationalStatus
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: status.severity.symbolName)
-                .font(.caption2)
-                .foregroundStyle(status.severity.color)
-            Text(text)
-                .font(.caption2)
-                .foregroundStyle(status.hasIssue ? .orange : .secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .help(helpText)
     }
 
-    private var text: String {
-        if status.hasIssue {
-            return "Provider status: \(status.displayMessage)"
-        }
-        if status.severity == .unknown {
-            return "Provider status: Not available"
-        }
-        return "Provider status: \(status.severity.title)"
+    private var readingText: String {
+        quality.compactText
+    }
+
+    private var trustText: String {
+        return readingText
+    }
+
+    private var trustTextColor: Color {
+        .secondary
+    }
+
+    private var symbolName: String {
+        quality.symbolName
+    }
+
+    private var symbolColor: Color {
+        quality.color
     }
 
     private var helpText: String {
-        guard let checkedAt = status.checkedAt else { return text }
-        return text + " • Checked " + checkedAt.formatted(date: .omitted, time: .shortened)
+        var lines = ["\(quality.displayText). Source: \(text). Updated \(updatedText)."]
+        if operationalStatus.hasIssue || operationalStatus.severity == .operational {
+            lines.append(operationalStatus.plainExplanation)
+        }
+        return lines.joined(separator: " ")
+    }
+}
+
+private struct ProviderStatusContextLine: View {
+    let status: ProviderOperationalStatus
+    let quality: ProviderReadingQuality
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "info.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange.opacity(0.75))
+                .fixedSize()
+            Text(status.contextText(for: quality))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .help(status.plainExplanation)
     }
 }
 
@@ -1096,6 +1153,6 @@ private struct EmptyState: View {
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

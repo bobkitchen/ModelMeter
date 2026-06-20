@@ -218,6 +218,248 @@ final class UsageReaderTests: XCTestCase {
         XCTAssertEqual(snapshot.errorMessage, "Live Codex refresh failed. Showing the last good Codex reading.")
     }
 
+    func testHistoryGraphNormalCadenceProducesNoDashedGaps() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, minute: 0, usedPercent: 10),
+            makeHistoryEntry(provider: .codex, minute: 15, usedPercent: 12)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(minute: 16)
+        )
+
+        XCTAssertEqual(data.series.count, 1)
+        XCTAssertEqual(data.series[0].segments, [
+            HistoryGraphSegment(startIndex: 0, endIndex: 1, isGap: false)
+        ])
+        XCTAssertFalse(data.containsGap)
+        XCTAssertNil(data.latestGapCaption)
+    }
+
+    func testHistoryGraphLongGapWithChangedValueProducesDashedSegmentAndCaption() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, minute: 50, usedPercent: 20),
+            makeHistoryEntry(provider: .codex, hour: 2, minute: 0, usedPercent: 44)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(hour: 2, minute: 1)
+        )
+
+        XCTAssertEqual(data.series[0].segments, [
+            HistoryGraphSegment(startIndex: 0, endIndex: 1, isGap: true)
+        ])
+        XCTAssertTrue(data.containsGap)
+        XCTAssertEqual(data.latestGapCaption, "No readings for 1h 10m; Codex +24% found on return")
+    }
+
+    func testHistoryGraphLongGapWithUnchangedValueOmitsCaption() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, minute: 50, usedPercent: 20),
+            makeHistoryEntry(provider: .codex, hour: 2, minute: 0, usedPercent: 20)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(hour: 2, minute: 1)
+        )
+
+        XCTAssertEqual(data.series[0].segments, [
+            HistoryGraphSegment(startIndex: 0, endIndex: 1, isGap: true)
+        ])
+        XCTAssertTrue(data.containsGap)
+        XCTAssertNil(data.latestGapCaption)
+    }
+
+    func testHistoryGraphCombinesMultipleProvidersInLatestGapCaption() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, minute: 50, usedPercent: 20),
+            makeHistoryEntry(provider: .codex, hour: 2, minute: 0, usedPercent: 44),
+            makeHistoryEntry(provider: .claude, minute: 51, usedPercent: 7),
+            makeHistoryEntry(provider: .claude, hour: 2, minute: 2, usedPercent: 9)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex, .claude],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(hour: 2, minute: 3)
+        )
+
+        XCTAssertTrue(data.containsGap)
+        XCTAssertEqual(data.latestGapCaption, "No readings for 1h 11m; Codex +24%, Claude +2% found on return")
+    }
+
+    func testHistoryGraphProviderFilteringRemovesHiddenProviderFromSeriesAndCaption() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, minute: 50, usedPercent: 20),
+            makeHistoryEntry(provider: .codex, hour: 2, minute: 0, usedPercent: 44),
+            makeHistoryEntry(provider: .claude, minute: 51, usedPercent: 7),
+            makeHistoryEntry(provider: .claude, hour: 2, minute: 2, usedPercent: 9)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.claude],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(hour: 2, minute: 3)
+        )
+
+        XCTAssertEqual(data.series.map(\.provider), [.claude])
+        XCTAssertEqual(data.latestGapCaption, "No readings for 1h 11m; Claude +2% found on return")
+    }
+
+    func testHistoryGraphCarriesLastReadingForwardToNowAfterGap() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, hour: 8, minute: 0, usedPercent: 32)
+        ]
+        let now = testDate(hour: 12)
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex],
+            rangeInterval: 24 * 60 * 60,
+            now: now
+        )
+
+        XCTAssertEqual(data.series.count, 1)
+        XCTAssertTrue(data.hasEnoughForChart)
+        XCTAssertEqual(data.series[0].points.count, 2)
+        XCTAssertEqual(data.series[0].points.last?.date, now)
+        XCTAssertEqual(data.series[0].points.last?.usedPercent, 32)
+        XCTAssertEqual(data.series[0].segments, [
+            HistoryGraphSegment(startIndex: 0, endIndex: 1, isGap: true)
+        ])
+        XCTAssertTrue(data.containsGap)
+        XCTAssertNil(data.latestGapCaption)
+    }
+
+    func testHistoryGraphDoesNotCarryForwardFreshSingleReading() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, hour: 11, minute: 59, usedPercent: 32)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(hour: 12)
+        )
+
+        XCTAssertEqual(data.series.count, 1)
+        XCTAssertEqual(data.series[0].points.count, 1)
+        XCTAssertFalse(data.hasEnoughForChart)
+        XCTAssertFalse(data.containsGap)
+    }
+
+    func testUsageHistoryCoalescesThirtySecondUnchangedReadingsToFifteenMinuteSamples() throws {
+        let start = testDate(hour: 8)
+        let entries = (0..<120).map { index in
+            makeHistoryEntry(
+                provider: .codex,
+                capturedAt: start.addingTimeInterval(TimeInterval(index * 30)),
+                usedPercent: 10
+            )
+        }
+
+        let coalesced = UsageHistoryStore.coalesced(entries, now: start.addingTimeInterval(60 * 60))
+
+        XCTAssertEqual(coalesced.count, 4)
+        XCTAssertEqual(coalesced.map { Int($0.capturedAt.timeIntervalSince(start) / 60) }, [0, 15, 30, 45])
+    }
+
+    func testUsageHistoryStoresMeaningfulUsageChangeImmediately() throws {
+        let start = testDate(hour: 8)
+        let entries = [
+            makeHistoryEntry(provider: .codex, capturedAt: start, usedPercent: 10),
+            makeHistoryEntry(provider: .codex, capturedAt: start.addingTimeInterval(30), usedPercent: 11)
+        ]
+
+        let coalesced = UsageHistoryStore.coalesced(entries, now: start.addingTimeInterval(60))
+
+        XCTAssertEqual(coalesced.count, 2)
+        XCTAssertEqual(coalesced.compactMap(\.primaryUsedPercent), [10, 11])
+    }
+
+    func testUsageHistoryIgnoresNearExactDuplicates() throws {
+        let start = testDate(hour: 8)
+        let entries = [
+            makeHistoryEntry(provider: .codex, capturedAt: start, usedPercent: 10),
+            makeHistoryEntry(provider: .codex, capturedAt: start.addingTimeInterval(1), usedPercent: 10)
+        ]
+
+        let coalesced = UsageHistoryStore.coalesced(entries, now: start.addingTimeInterval(60))
+
+        XCTAssertEqual(coalesced.count, 1)
+    }
+
+    func testUsageHistoryRetainsEightDaysOfFifteenMinuteSamples() throws {
+        let now = testDate(hour: 12)
+        let start = now.addingTimeInterval(-9 * 24 * 60 * 60)
+        let entries = (0...(9 * 24 * 4)).map { index in
+            makeHistoryEntry(
+                provider: .codex,
+                capturedAt: start.addingTimeInterval(TimeInterval(index) * UsageHistoryStore.graphSamplingInterval),
+                usedPercent: 10
+            )
+        }
+
+        let coalesced = UsageHistoryStore.coalesced(entries, now: now)
+
+        XCTAssertEqual(coalesced.count, (8 * 24 * 4) + 1)
+        XCTAssertTrue(coalesced.allSatisfy { $0.capturedAt >= now.addingTimeInterval(-8 * 24 * 60 * 60) })
+    }
+
+    func testUsageHistoryLoadImportsExistingUserDefaultsHistorySafely() throws {
+        let suiteName = "ModelMeterTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let start = testDate(hour: 8)
+        let rawEntries = (0..<120).map { index in
+            makeHistoryEntry(
+                provider: .codex,
+                capturedAt: start.addingTimeInterval(TimeInterval(index * 30)),
+                usedPercent: 10
+            )
+        }
+        defaults.set(try JSONEncoder().encode(rawEntries), forKey: "usageHistoryEntries")
+
+        let loaded = UsageHistoryStore.load(now: start.addingTimeInterval(60 * 60), defaults: defaults)
+        let saved = try XCTUnwrap(defaults.data(forKey: "usageHistoryEntries"))
+        let savedEntries = try JSONDecoder().decode([UsageHistoryEntry].self, from: saved)
+
+        XCTAssertEqual(loaded.count, 4)
+        XCTAssertEqual(savedEntries.count, 4)
+    }
+
+    func testHistoryGraphMarksDownwardGapAsResetWithoutNegativeCaption() throws {
+        let entries = [
+            makeHistoryEntry(provider: .codex, minute: 0, usedPercent: 80),
+            makeHistoryEntry(provider: .codex, hour: 2, minute: 0, usedPercent: 10)
+        ]
+
+        let data = HistoryGraphData.make(
+            entries: entries,
+            visibleProviders: [.codex],
+            rangeInterval: 24 * 60 * 60,
+            now: testDate(hour: 2, minute: 1)
+        )
+
+        XCTAssertEqual(data.series[0].segments, [
+            HistoryGraphSegment(startIndex: 0, endIndex: 1, isGap: true, isReset: true)
+        ])
+        XCTAssertNil(data.latestGapCaption)
+    }
+
     private func makeRateLimits(sourcePath: String, usedPercent: Double) -> CodexRateLimits {
         CodexRateLimits(
             primary: RateLimitWindow(
@@ -234,6 +476,44 @@ final class UsageReaderTests: XCTestCase {
             planType: "prolite",
             capturedAt: Date(timeIntervalSince1970: 1_778_982_000),
             sourcePath: sourcePath
+        )
+    }
+
+    private var testCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
+    private func testDate(hour: Int = 0, minute: Int = 0) -> Date {
+        DateComponents(
+            calendar: testCalendar,
+            timeZone: TimeZone(secondsFromGMT: 0),
+            year: 2026,
+            month: 6,
+            day: 14,
+            hour: hour,
+            minute: minute
+        ).date!
+    }
+
+    private func makeHistoryEntry(provider: ProviderKind, hour: Int = 0, minute: Int, usedPercent: Double) -> UsageHistoryEntry {
+        makeHistoryEntry(
+            provider: provider,
+            capturedAt: testDate(hour: hour, minute: minute),
+            usedPercent: usedPercent
+        )
+    }
+
+    private func makeHistoryEntry(provider: ProviderKind, capturedAt: Date, usedPercent: Double) -> UsageHistoryEntry {
+        UsageHistoryEntry(
+            provider: provider,
+            capturedAt: capturedAt,
+            primaryUsedPercent: usedPercent,
+            primaryRemainingPercent: 100 - usedPercent,
+            secondaryUsedPercent: nil,
+            secondaryRemainingPercent: nil,
+            sourceLabel: "test"
         )
     }
 

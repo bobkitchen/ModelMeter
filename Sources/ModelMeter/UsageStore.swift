@@ -617,33 +617,83 @@ private enum LastGoodUsageCache {
     }
 }
 
-private enum UsageHistoryStore {
+enum UsageHistoryStore {
     private static let key = "usageHistoryEntries"
-    private static let maximumAge: TimeInterval = 7 * 24 * 60 * 60
-    private static let maximumEntries = 1_200
+    static let graphSamplingInterval: TimeInterval = 15 * 60
+    static let gapDisplayThreshold: TimeInterval = 30 * 60
+    private static let meaningfulPercentChange = 1.0
+    private static let maximumAge: TimeInterval = 8 * 24 * 60 * 60
+    private static let maximumEntries = 10_000
 
-    static func load(now: Date = Date()) -> [UsageHistoryEntry] {
-        guard let data = UserDefaults.standard.data(forKey: key),
+    static func load(now: Date = Date(), defaults: UserDefaults = .standard) -> [UsageHistoryEntry] {
+        guard let data = defaults.data(forKey: key),
               let entries = try? JSONDecoder().decode([UsageHistoryEntry].self, from: data) else {
             return []
         }
-        return prune(entries, now: now)
+        let loaded = prune(coalesced(entries, now: now), now: now)
+        if loaded != entries {
+            save(loaded, defaults: defaults)
+        }
+        return loaded
     }
 
-    static func append(_ entry: UsageHistoryEntry, to entries: [UsageHistoryEntry], now: Date = Date()) -> [UsageHistoryEntry] {
-        var next = entries
-        let duplicate = next.contains { existing in
-            existing.provider == entry.provider
-                && abs(existing.capturedAt.timeIntervalSince(entry.capturedAt)) < 2
-                && existing.primaryUsedPercent == entry.primaryUsedPercent
-                && existing.secondaryUsedPercent == entry.secondaryUsedPercent
+    static func append(_ entry: UsageHistoryEntry, to entries: [UsageHistoryEntry], now: Date = Date(), defaults: UserDefaults = .standard) -> [UsageHistoryEntry] {
+        var candidate = entries
+        candidate.append(entry)
+        let next = prune(coalesced(candidate, now: now), now: now)
+        if next != entries {
+            save(next, defaults: defaults)
         }
-        if !duplicate {
-            next.append(entry)
-        }
-        next = prune(next, now: now)
-        save(next)
         return next
+    }
+
+    static func coalesced(_ entries: [UsageHistoryEntry], now: Date = Date()) -> [UsageHistoryEntry] {
+        let cutoff = now.addingTimeInterval(-maximumAge)
+        let sorted = entries
+            .filter { $0.capturedAt >= cutoff }
+            .sorted { $0.capturedAt < $1.capturedAt }
+        var keptByProvider: [ProviderKind: [UsageHistoryEntry]] = [:]
+
+        for entry in sorted {
+            guard entry.primaryUsedPercent != nil || entry.secondaryUsedPercent != nil else { continue }
+            let last = keptByProvider[entry.provider]?.last
+            guard shouldStore(entry, after: last) else { continue }
+            keptByProvider[entry.provider, default: []].append(entry)
+        }
+
+        return keptByProvider
+            .values
+            .flatMap { $0 }
+            .sorted { $0.capturedAt < $1.capturedAt }
+    }
+
+    private static func shouldStore(_ entry: UsageHistoryEntry, after previous: UsageHistoryEntry?) -> Bool {
+        guard let previous else { return true }
+        if isNearExactDuplicate(entry, of: previous) {
+            return false
+        }
+        if hasMeaningfulChange(from: previous, to: entry) {
+            return true
+        }
+        return entry.capturedAt.timeIntervalSince(previous.capturedAt) >= graphSamplingInterval
+    }
+
+    private static func isNearExactDuplicate(_ entry: UsageHistoryEntry, of previous: UsageHistoryEntry) -> Bool {
+        entry.provider == previous.provider
+            && abs(entry.capturedAt.timeIntervalSince(previous.capturedAt)) < 2
+            && entry.primaryUsedPercent == previous.primaryUsedPercent
+            && entry.secondaryUsedPercent == previous.secondaryUsedPercent
+    }
+
+    private static func hasMeaningfulChange(from previous: UsageHistoryEntry, to entry: UsageHistoryEntry) -> Bool {
+        let primaryDelta = percentDelta(previous.primaryUsedPercent, entry.primaryUsedPercent)
+        let secondaryDelta = percentDelta(previous.secondaryUsedPercent, entry.secondaryUsedPercent)
+        return max(primaryDelta, secondaryDelta) >= meaningfulPercentChange
+    }
+
+    private static func percentDelta(_ previous: Double?, _ current: Double?) -> Double {
+        guard let previous, let current else { return 0 }
+        return abs(current - previous)
     }
 
     private static func prune(_ entries: [UsageHistoryEntry], now: Date) -> [UsageHistoryEntry] {
@@ -656,9 +706,9 @@ private enum UsageHistoryStore {
         )
     }
 
-    private static func save(_ entries: [UsageHistoryEntry]) {
+    private static func save(_ entries: [UsageHistoryEntry], defaults: UserDefaults) {
         guard let data = try? JSONEncoder().encode(entries) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        defaults.set(data, forKey: key)
     }
 }
 

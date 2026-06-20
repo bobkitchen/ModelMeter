@@ -4,6 +4,35 @@ import Sparkle
 import SwiftUI
 import UserNotifications
 
+extension Notification.Name {
+    static let openSettingsScene = Notification.Name("ModelMeterOpenSettingsScene")
+}
+
+@MainActor
+enum SettingsWindowFocus {
+    static func bringForwardSoon(retries: Int = 8) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            bringForward(retries: retries)
+        }
+    }
+
+    private static func bringForward(retries: Int) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let settingsWindow = NSApp.windows.first(where: { $0.title.localizedCaseInsensitiveContains("settings") }) {
+            settingsWindow.level = .normal
+            settingsWindow.orderFrontRegardless()
+            settingsWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        guard retries > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            bringForward(retries: retries - 1)
+        }
+    }
+}
+
 @main
 struct ModelMeterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -12,7 +41,8 @@ struct ModelMeterApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appDelegate.store)
-                .frame(width: 640, height: 560)
+                .frame(width: 620, height: 480)
+                .preferredColorScheme(.dark)
         }
     }
 }
@@ -28,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let defaultDashboardWidth: CGFloat = 390
     private let minimumDashboardWidth: CGFloat = 360
     private let minimumDashboardHeight: CGFloat = 420
-    private var settingsWindow: NSWindow?
+    private var keyMonitor: Any?
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -37,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         configurePopover()
         configureContextMenu()
         configureStatusItem()
+        configureKeyboardShortcuts()
         bindStatusItem()
 
         store.start()
@@ -46,6 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
         statusItem = nil
     }
 
@@ -155,6 +189,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem = item
         DispatchQueue.main.async { [weak self] in
             self?.updateStatusItem()
+        }
+    }
+
+    private func configureKeyboardShortcuts() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            guard self.popover.isShown else { return event }
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else { return event }
+            guard event.charactersIgnoringModifiers == "," else { return event }
+            self.openSettings(event)
+            return nil
         }
     }
 
@@ -278,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         var lines = ["Model Meter"]
         if store.providerStatusWarningsEnabled {
             for status in [store.providerStatuses.codex, store.providerStatuses.claude, store.providerStatuses.gemini] where status.hasIssue {
-                lines.append("\(status.provider.rawValue): \(status.severity.title) - \(status.displayMessage)")
+                lines.append(status.plainExplanation)
             }
         }
         return lines.joined(separator: "\n")
@@ -320,33 +365,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         SettingsStore.shared.popoverSize = CGSize(width: next.width, height: next.height)
     }
 
-    private func showSettingsWindow() {
-        if let settingsWindow {
-            settingsWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let controller = NSHostingController(
-            rootView: SettingsView()
-                .environmentObject(store)
-                .frame(width: 640, height: 560)
-        )
-        let window = NSWindow(contentViewController: controller)
-        window.setContentSize(NSSize(width: 640, height: 560))
-        window.minSize = NSSize(width: 560, height: 500)
-        window.title = "Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.isReleasedWhenClosed = false
-        window.center()
-        settingsWindow = window
-        window.makeKeyAndOrderFront(nil)
+    @objc func openSettings(_ sender: Any?) {
         NSApp.activate(ignoringOtherApps: true)
+        _ = popover.contentViewController?.view
+        NotificationCenter.default.post(name: .openSettingsScene, object: nil)
+        SettingsWindowFocus.bringForwardSoon()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.popover.performClose(sender)
+        }
     }
 
-    @objc func openSettings(_ sender: Any?) {
+    @objc func closePopover(_ sender: Any?) {
         popover.performClose(sender)
-        showSettingsWindow()
     }
 
     @objc func checkForUpdates(_ sender: Any?) {

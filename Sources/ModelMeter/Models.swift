@@ -152,6 +152,40 @@ enum ProviderReadingQuality {
         return title
     }
 
+    var hasCurrentReading: Bool {
+        switch self {
+        case .freshLive, .localFallback:
+            return true
+        case .lastGood, .unavailable, .notConfigured:
+            return false
+        }
+    }
+
+    var compactText: String {
+        switch self {
+        case .freshLive(let source):
+            return "Fresh · \(Self.compactSource(source))"
+        case .localFallback(let source):
+            return "Local · \(Self.compactSource(source))"
+        case .lastGood:
+            return "Last good"
+        case .unavailable:
+            return "Not refreshed"
+        case .notConfigured:
+            return "Not connected"
+        }
+    }
+
+    private static func compactSource(_ source: String) -> String {
+        let lowercased = source.lowercased()
+        if lowercased.contains("oauth") { return "OAuth" }
+        if lowercased.contains("claude") { return "Claude" }
+        if lowercased.contains("gemini") { return "Gemini" }
+        if lowercased.contains("local") { return "Local" }
+        if lowercased.contains("app") { return "App server" }
+        return source
+    }
+
     var symbolName: String {
         switch self {
         case .freshLive:
@@ -189,6 +223,204 @@ enum ProviderKind: String, CaseIterable, Identifiable, Codable {
     case gemini = "Gemini"
 
     var id: Self { self }
+}
+
+struct HistoryGraphPoint: Equatable {
+    let date: Date
+    let usedPercent: Double
+}
+
+struct HistoryGraphSegment: Equatable {
+    let startIndex: Int
+    let endIndex: Int
+    let isGap: Bool
+    let isReset: Bool
+
+    init(startIndex: Int, endIndex: Int, isGap: Bool, isReset: Bool = false) {
+        self.startIndex = startIndex
+        self.endIndex = endIndex
+        self.isGap = isGap
+        self.isReset = isReset
+    }
+}
+
+struct HistoryGraphSeries: Equatable {
+    let provider: ProviderKind
+    let points: [HistoryGraphPoint]
+    let segments: [HistoryGraphSegment]
+}
+
+struct HistoryGraphData: Equatable {
+    let series: [HistoryGraphSeries]
+    let latestGapCaption: String?
+
+    var containsGap: Bool {
+        series.contains { providerSeries in
+            providerSeries.segments.contains { $0.isGap }
+        }
+    }
+
+    var hasEnoughForChart: Bool {
+        series.contains { $0.points.count > 1 }
+    }
+
+    static func make(
+        entries: [UsageHistoryEntry],
+        visibleProviders: [ProviderKind],
+        rangeInterval: TimeInterval,
+        now: Date = Date(),
+        gapThreshold: TimeInterval = 30 * 60
+    ) -> HistoryGraphData {
+        let cutoff = now.addingTimeInterval(-rangeInterval)
+        var allGapSummaries: [HistoryGapSummary] = []
+
+        let series = visibleProviders.compactMap { provider -> HistoryGraphSeries? in
+            let providerSamples = entries
+                .filter { $0.provider == provider && $0.capturedAt <= now && $0.primaryUsedPercent != nil }
+                .sorted { $0.capturedAt < $1.capturedAt }
+
+            guard !providerSamples.isEmpty else { return nil }
+
+            let rangeSamples = providerSamples.filter { $0.capturedAt >= cutoff }
+            let anchorSample = providerSamples.last { $0.capturedAt < cutoff }
+            var nodes: [HistoryTimelineNode] = []
+
+            if let anchorSample,
+               let used = anchorSample.primaryUsedPercent {
+                nodes.append(
+                    HistoryTimelineNode(
+                        point: HistoryGraphPoint(date: cutoff, usedPercent: used),
+                        sampleDate: anchorSample.capturedAt,
+                        isCarriedForward: true
+                    )
+                )
+            }
+
+            nodes.append(
+                contentsOf: rangeSamples.compactMap { sample in
+                    guard let used = sample.primaryUsedPercent else { return nil }
+                    return HistoryTimelineNode(
+                        point: HistoryGraphPoint(date: sample.capturedAt, usedPercent: used),
+                        sampleDate: sample.capturedAt,
+                        isCarriedForward: false
+                    )
+                }
+            )
+
+            guard !nodes.isEmpty else { return nil }
+
+            if let latestSample = providerSamples.last,
+               let latestUsed = latestSample.primaryUsedPercent,
+               now.timeIntervalSince(latestSample.capturedAt) > gapThreshold,
+               let latestPoint = nodes.last?.point,
+               now.timeIntervalSince(latestPoint.date) > 60 {
+                nodes.append(
+                    HistoryTimelineNode(
+                        point: HistoryGraphPoint(date: now, usedPercent: latestUsed),
+                        sampleDate: now,
+                        isCarriedForward: true
+                    )
+                )
+            }
+
+            var segments: [HistoryGraphSegment] = []
+            if nodes.count > 1 {
+                for index in 1..<nodes.count {
+                    let previous = nodes[index - 1]
+                    let current = nodes[index]
+                    let sampleGap = current.sampleDate.timeIntervalSince(previous.sampleDate)
+                    let delta = current.point.usedPercent - previous.point.usedPercent
+                    let isGap = current.isCarriedForward || sampleGap > gapThreshold
+                    let isReset = delta.rounded() <= -1
+                    segments.append(
+                        HistoryGraphSegment(
+                            startIndex: index - 1,
+                            endIndex: index,
+                            isGap: isGap,
+                            isReset: isReset
+                        )
+                    )
+
+                    if isGap && !current.isCarriedForward && !isReset {
+                        if delta.rounded() >= 1 {
+                            allGapSummaries.append(
+                                HistoryGapSummary(
+                                    provider: provider,
+                                    delta: delta,
+                                    startDate: previous.sampleDate,
+                                    endDate: current.sampleDate
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            return HistoryGraphSeries(
+                provider: provider,
+                points: nodes.map(\.point),
+                segments: segments
+            )
+        }
+
+        return HistoryGraphData(
+            series: series,
+            latestGapCaption: Self.caption(for: allGapSummaries)
+        )
+    }
+
+    private static func caption(for summaries: [HistoryGapSummary]) -> String? {
+        guard let latestEnd = summaries.map(\.endDate).max() else { return nil }
+        let groupWindow: TimeInterval = 5 * 60
+        let latest = summaries
+            .filter { abs($0.endDate.timeIntervalSince(latestEnd)) <= groupWindow }
+            .sorted { lhs, rhs in
+                let order = ProviderKind.allCases
+                let lhsIndex = order.firstIndex(of: lhs.provider) ?? order.endIndex
+                let rhsIndex = order.firstIndex(of: rhs.provider) ?? order.endIndex
+                return lhsIndex < rhsIndex
+            }
+        guard !latest.isEmpty else { return nil }
+
+        let longestGap = latest
+            .map { $0.endDate.timeIntervalSince($0.startDate) }
+            .max() ?? 0
+        let changes = latest
+            .map { "\($0.provider.rawValue) \(Self.formatDelta($0.delta))" }
+            .joined(separator: ", ")
+        return "No readings for \(Self.formatDuration(longestGap)); \(changes) found on return"
+    }
+
+    private static func formatDelta(_ delta: Double) -> String {
+        let rounded = Int(delta.rounded())
+        return "\(rounded >= 0 ? "+" : "")\(rounded)%"
+    }
+
+    private static func formatDuration(_ duration: TimeInterval) -> String {
+        let totalMinutes = max(Int(duration.rounded() / 60), 1)
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        if hours > 0, minutes > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        if hours > 0 {
+            return "\(hours)h"
+        }
+        return "\(minutes)m"
+    }
+}
+
+private struct HistoryTimelineNode {
+    let point: HistoryGraphPoint
+    let sampleDate: Date
+    let isCarriedForward: Bool
+}
+
+private struct HistoryGapSummary {
+    let provider: ProviderKind
+    let delta: Double
+    let startDate: Date
+    let endDate: Date
 }
 
 enum HistoryGraphPosition: String, CaseIterable, Identifiable {
@@ -319,6 +551,102 @@ struct ProviderOperationalStatus: Equatable {
 
     var hasIssue: Bool { severity.isIssue }
     var displayMessage: String { message ?? severity.title }
+
+    var statusLineText: String {
+        if hasIssue {
+            if let affectedServiceLabel {
+                return "\(statusProviderName) \(affectedServiceLabel) issue"
+            }
+            return "\(statusProviderName) service issue"
+        }
+        if severity == .unknown {
+            return "\(statusProviderName) status not available"
+        }
+        return "\(statusProviderName) status: all clear"
+    }
+
+    func contextText(for quality: ProviderReadingQuality) -> String {
+        if quality.hasCurrentReading {
+            return "\(statusProviderName) reports \(issueSummary), but this reading succeeded."
+        }
+        if case .lastGood = quality {
+            return "\(statusProviderName) reports \(issueSummary). Showing the last good reading."
+        }
+        return "\(statusProviderName) reports \(issueSummary)."
+    }
+
+    var plainExplanation: String {
+        if hasIssue {
+            if let affectedService {
+                return "\(statusProviderName)'s public status page says \(affectedService) is \(plainIssueDescription). Your Model Meter balance reading may still work."
+            }
+            return "\(statusProviderName)'s public status page says some services are \(plainIssueDescription). Your Model Meter balance reading may still work."
+        }
+        if severity == .unknown {
+            return "Model Meter could not check \(statusProviderName)'s public status page."
+        }
+        return "\(statusProviderName)'s public status page says services are running normally."
+    }
+
+    private var statusProviderName: String {
+        switch provider {
+        case .codex:
+            return "OpenAI"
+        case .claude:
+            return "Claude"
+        case .gemini:
+            return "Google"
+        }
+    }
+
+    private var affectedService: String? {
+        let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
+    private var affectedServiceLabel: String? {
+        guard let affectedService else { return nil }
+        let lowercased = affectedService.lowercased()
+        if provider == .claude, lowercased.contains("claude.ai") { return "web" }
+        if lowercased == "login" { return "login" }
+        if lowercased == "api" { return "API" }
+        return affectedService
+    }
+
+    private var issueSummary: String {
+        guard let affectedServiceLabel else { return "service issues" }
+        return "\(affectedServiceLabel) issues"
+    }
+
+    private var plainIssueNoun: String {
+        switch severity {
+        case .degraded:
+            return "problems"
+        case .partialOutage:
+            return "outage"
+        case .majorOutage:
+            return "major outage"
+        case .maintenance:
+            return "maintenance"
+        case .unknown, .operational:
+            return severity.title.lowercased()
+        }
+    }
+
+    private var plainIssueDescription: String {
+        switch severity {
+        case .degraded:
+            return "having problems"
+        case .partialOutage:
+            return "partly down"
+        case .majorOutage:
+            return "down for many users"
+        case .maintenance:
+            return "under maintenance"
+        case .unknown, .operational:
+            return severity.title.lowercased()
+        }
+    }
 }
 
 struct ProviderStatusSnapshot: Equatable {
